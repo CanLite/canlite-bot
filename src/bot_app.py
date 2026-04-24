@@ -45,9 +45,9 @@ def build_private_link_dm_embed(result: dict[str, object]) -> discord.Embed:
         description=f"You were added to `{domain}`.",
         color=discord.Color.blue(),
     )
-    embed.add_field(name="Domain", value=domain, inline=False)
+    embed.add_field(name="Domain", value="https://" + str(domain), inline=False)
     embed.add_field(name="Cover URL", value=str(result.get("cover_url") or "Not set"), inline=False)
-    embed.add_field(name="Login Path", value=str(result.get("login_path") or "Not set"), inline=False)
+    embed.add_field(name="Login Path", value="https://" + str(domain) + str(result.get("login_path") or "Not set"), inline=False)
     embed.add_field(name="Cost", value=f"{float(result.get('monthly_cost_credits') or 0):.2f} credits/month", inline=False)
     return embed
 
