@@ -1,0 +1,1 @@
+# CanLite Discord bot package.
