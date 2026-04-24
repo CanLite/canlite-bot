@@ -3,6 +3,8 @@ import random
 import discord
 
 from .catalog import catalog_store
+from .config import DISPENSE_LIMIT, DISPENSE_LOG_CHANNEL_ID
+from .dispense_usage import get_remaining_count, record_dispense
 from .utils import slugify, titleize
 
 
@@ -11,14 +13,16 @@ def build_dispenser_embed() -> discord.Embed:
 
     embed = discord.Embed(
         title="CanLite Link Dispenser",
-        description="Choose a site button below. The filter picker will open privately for you.",
+        description="Choose a site below. The filter picker opens privately, and each member gets 3 links until a moderator resets them.",
         color=discord.Color.from_rgb(116, 217, 182),
     )
-    embed.add_field(name="Catalog", value=f"{site_count} sites available", inline=False)
+    embed.add_field(name="Catalog", value=f"{site_count} sites available", inline=True)
+    embed.add_field(name="Limit", value=f"{DISPENSE_LIMIT} links per member", inline=True)
+    embed.set_footer(text="Links are delivered privately. Moderator resets are supported.")
     return embed
 
 
-def build_private_dispenser_embed(selected_site: str, selected_filter: str | None) -> discord.Embed:
+def build_private_dispenser_embed(selected_site: str, selected_filter: str | None, remaining_uses: int) -> discord.Embed:
     filter_count = len(catalog_store.get_filters_for_site(selected_site))
 
     embed = discord.Embed(
@@ -28,8 +32,42 @@ def build_private_dispenser_embed(selected_site: str, selected_filter: str | Non
     )
     embed.add_field(name="Site", value=selected_site, inline=True)
     embed.add_field(name="Filter", value=selected_filter or "Not selected", inline=True)
+    embed.add_field(name="Remaining", value=f"{remaining_uses}/{DISPENSE_LIMIT}", inline=True)
     embed.add_field(name="Catalog", value=f"{filter_count} filters for this site", inline=False)
+    embed.set_footer(text="Your selection and generated link stay visible only to you.")
     return embed
+
+
+async def send_dispense_log(
+    interaction: discord.Interaction,
+    selected_site: str,
+    selected_filter: str,
+    generated_url: str,
+    remaining_uses: int,
+) -> None:
+    channel = interaction.client.get_channel(DISPENSE_LOG_CHANNEL_ID)
+    if channel is None:
+        try:
+            channel = await interaction.client.fetch_channel(DISPENSE_LOG_CHANNEL_ID)
+        except discord.HTTPException:
+            return
+
+    if not isinstance(channel, discord.abc.Messageable):
+        return
+
+    guild_name = interaction.guild.name if interaction.guild else "Direct Messages"
+    embed = discord.Embed(
+        title="Dispenser Log",
+        color=discord.Color.orange(),
+        timestamp=discord.utils.utcnow(),
+    )
+    embed.add_field(name="Member", value=f"{interaction.user.mention} (`{interaction.user.id}`)", inline=False)
+    embed.add_field(name="Server", value=guild_name, inline=True)
+    embed.add_field(name="Site", value=selected_site, inline=True)
+    embed.add_field(name="Filter", value=titleize(selected_filter), inline=True)
+    embed.add_field(name="Remaining Uses", value=f"{remaining_uses}/{DISPENSE_LIMIT}", inline=True)
+    embed.add_field(name="URL", value=generated_url, inline=False)
+    await channel.send(embed=embed)
 
 
 class SiteButton(discord.ui.Button):
@@ -48,9 +86,10 @@ class SiteButton(discord.ui.Button):
             await interaction.response.send_message("That site has no filters configured yet.", ephemeral=True)
             return
 
+        remaining_uses = get_remaining_count(interaction.guild_id, interaction.user.id)
         view = PrivateDispenserView(selected_site=self.site_name)
         await interaction.response.send_message(
-            embed=build_private_dispenser_embed(self.site_name, None),
+            embed=build_private_dispenser_embed(self.site_name, None, remaining_uses),
             view=view,
             ephemeral=True,
         )
@@ -78,8 +117,9 @@ class FilterSelect(discord.ui.Select):
             return
         view.selected_filter = self.values[0] if self.values[0] != "__none__" else None
         view.refresh_items()
+        remaining_uses = get_remaining_count(interaction.guild_id, interaction.user.id)
         await interaction.response.edit_message(
-            embed=build_private_dispenser_embed(view.selected_site, view.selected_filter),
+            embed=build_private_dispenser_embed(view.selected_site, view.selected_filter, remaining_uses),
             view=view,
         )
 
@@ -98,13 +138,31 @@ class GenerateButton(discord.ui.Button):
         if not isinstance(view, PrivateDispenserView):
             await interaction.response.send_message("This private dispenser is no longer active. Use /dispense again.", ephemeral=True)
             return
+        remaining_before = get_remaining_count(interaction.guild_id, interaction.user.id)
+        if remaining_before <= 0:
+            await interaction.response.send_message(
+                "You have used all 3 dispenser links. Ask a moderator to reset your limit.",
+                ephemeral=True,
+            )
+            return
         matches = catalog_store.get_matching_entries(view.selected_site, view.selected_filter)
         if not matches:
             await interaction.response.send_message("No URLs match that site and filter.", ephemeral=True)
             return
 
         chosen = random.choice(matches)
-        await interaction.response.send_message(chosen.url, ephemeral=True)
+        usage = record_dispense(interaction.guild_id, interaction.user.id)
+        result_embed = discord.Embed(
+            title="Your Link",
+            description=chosen.url,
+            color=discord.Color.green(),
+        )
+        result_embed.add_field(name="Site", value=view.selected_site, inline=True)
+        result_embed.add_field(name="Filter", value=titleize(view.selected_filter or "not-selected"), inline=True)
+        result_embed.add_field(name="Remaining", value=f"{usage['remaining']}/{DISPENSE_LIMIT}", inline=True)
+        result_embed.set_footer(text="This message is only visible to you.")
+        await interaction.response.send_message(embed=result_embed, ephemeral=True)
+        await send_dispense_log(interaction, view.selected_site, view.selected_filter or "", chosen.url, usage["remaining"])
 
 
 class PrivateDispenserView(discord.ui.View):

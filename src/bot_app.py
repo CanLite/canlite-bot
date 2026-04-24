@@ -17,6 +17,7 @@ from .database import (
     grant_level_up_credit,
     remove_private_link_member,
 )
+from .dispense_usage import ensure_dispense_usage_store, reset_guild_dispense, reset_user_dispense
 from .models import SiteEntry
 from .utils import parse_tags, slugify
 from .views import SiteDispenserView, build_dispenser_embed
@@ -76,6 +77,7 @@ async def assign_linked_role(interaction: discord.Interaction) -> tuple[bool, st
 async def setup_hook() -> None:
     bot.db_pool = await create_pool()
     ensure_xp_store()
+    ensure_dispense_usage_store()
     bot.add_view(SiteDispenserView())
 
     if DISCORD_GUILD_ID:
@@ -201,9 +203,12 @@ async def credits_command(interaction: discord.Interaction) -> None:
         )
         return
 
+    embed = discord.Embed(title="CanLite Credits", color=discord.Color.green())
+    embed.add_field(name="Member", value=interaction.user.mention, inline=True)
+    embed.add_field(name="Balance", value=str(balance), inline=True)
+    embed.set_footer(text="Credit balance is shown publicly in this channel.")
     await interaction.response.send_message(
-        f"You currently have {balance} CanLite credits.",
-        ephemeral=True,
+        embed=embed,
     )
 
 
@@ -222,12 +227,29 @@ async def leaderboard_command(interaction: discord.Interaction) -> None:
 
     lines = []
     for index, (user_id, data) in enumerate(rows, start=1):
-        member = interaction.guild.get_member(int(user_id)) if interaction.guild else None
-        name = member.display_name if member else f"User {user_id}"
-        lines.append(f"{index}. {name} - Level {data.get('level', 0)} - {data.get('xp', 0)} XP")
+        lines.append(f"{index}. <@{user_id}> - Level {data.get('level', 0)} - {data.get('xp', 0)} XP")
 
     embed = discord.Embed(title="XP Leaderboard", description="\n".join(lines), color=discord.Color.gold())
+    embed.set_footer(text=f"Showing top {len(lines)} members in this server.")
     await interaction.response.send_message(embed=embed)
+
+
+@bot.tree.command(name="reset-dispense-user", description="Reset one member's dispenser limit.")
+@app_commands.check(is_catalog_admin)
+@app_commands.describe(member="The member whose 3-link dispenser limit should be reset.")
+async def reset_dispense_user_command(interaction: discord.Interaction, member: discord.Member) -> None:
+    changed = reset_user_dispense(interaction.guild_id, member.id)
+    message = f"Reset dispenser usage for {member.mention}."
+    if not changed:
+        message = f"{member.mention} was already at 0 used links."
+    await interaction.response.send_message(message)
+
+
+@bot.tree.command(name="reset-dispense-server", description="Reset dispenser limits for the whole server.")
+@app_commands.check(is_catalog_admin)
+async def reset_dispense_server_command(interaction: discord.Interaction) -> None:
+    affected = reset_guild_dispense(interaction.guild_id)
+    await interaction.response.send_message(f"Reset dispenser usage for this server. Cleared {affected} member record(s).")
 
 
 @bot.tree.command(name="add-link", description="Add one URL entry to the dispenser catalog.")
@@ -333,6 +355,8 @@ async def list_links_command(interaction: discord.Interaction) -> None:
 @bulk_add_links_command.error
 @remove_link_command.error
 @list_links_command.error
+@reset_dispense_user_command.error
+@reset_dispense_server_command.error
 async def admin_command_error(interaction: discord.Interaction, error: app_commands.AppCommandError) -> None:
     if isinstance(error, app_commands.CheckFailure):
         message = "You need `Manage Server` or `Administrator` to manage the catalog."
