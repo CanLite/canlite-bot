@@ -21,7 +21,7 @@ DISCORD_GUILD_ID = os.getenv("DISCORD_GUILD_ID", "").strip()
 DATABASE_SSL = os.getenv("DATABASE_SSL", "false").lower() == "true"
 LINKED_ROLE_ID = int(os.getenv("LINKED_ROLE_ID", "1497028527273541722"))
 
-CATALOG_PATH = BASE_DIR / "proxy-sites.json"
+SITES_DIR = BASE_DIR / "Sites"
 XP_PATH = BASE_DIR / "xp-data.json"
 
 XP_COOLDOWN_SECONDS = 45

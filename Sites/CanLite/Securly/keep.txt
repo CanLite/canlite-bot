@@ -1,0 +1,1 @@
+Keep this folder in git. Add one URL per line to links.txt.

@@ -1,11 +1,15 @@
 import csv
 import io
-import json
 from collections import defaultdict
+from pathlib import Path
 
-from .config import CATALOG_PATH
+from .config import SITES_DIR
 from .models import CatalogImportResult, SiteEntry
 from .utils import parse_tags, slugify
+
+LINKS_FILENAME = "links.txt"
+PLACEHOLDER_FILENAME = "keep.txt"
+PLACEHOLDER_TEXT = "Keep this folder in git. Add one URL per line to links.txt.\n"
 
 
 def _normalize_entry(item: dict) -> SiteEntry:
@@ -38,23 +42,64 @@ def _normalize_entry(item: dict) -> SiteEntry:
 class CatalogStore:
     def __init__(self) -> None:
         self.entries: list[SiteEntry] = []
+        self.site_filters: dict[str, set[str]] = {}
         self.reload()
 
     def reload(self) -> None:
-        raw_entries = json.loads(CATALOG_PATH.read_text(encoding="utf-8"))
-        self.entries = [_normalize_entry(item) for item in raw_entries]
+        self.entries = []
+        site_filters: dict[str, set[str]] = defaultdict(set)
+        SITES_DIR.mkdir(parents=True, exist_ok=True)
+
+        for site_dir in sorted((path for path in SITES_DIR.iterdir() if path.is_dir()), key=lambda path: path.name.lower()):
+            site_name = site_dir.name.strip()
+            if not site_name:
+                continue
+
+            for filter_dir in sorted((path for path in site_dir.iterdir() if path.is_dir()), key=lambda path: path.name.lower()):
+                filter_name = filter_dir.name.strip()
+                if not filter_name:
+                    continue
+
+                site_filters[site_name].add(filter_name)
+                self._ensure_filter_files(site_name, filter_name)
+
+                for url in self._read_links_file(self._links_path(site_name, filter_name)):
+                    self.entries.append(
+                        SiteEntry(
+                            id=slugify(f"{site_name}-{filter_name}-{url}"),
+                            site=site_name,
+                            filter_name=filter_name,
+                            url=url,
+                            category="general",
+                            host_type="custom-domain",
+                            status="stable",
+                            tags=[],
+                        )
+                    )
+
+        self.site_filters = dict(sorted((site_name, set(filters)) for site_name, filters in site_filters.items()))
 
     def save(self) -> None:
-        CATALOG_PATH.write_text(
-            json.dumps([entry.to_storage() for entry in self.entries], indent=2) + "\n",
-            encoding="utf-8",
-        )
+        SITES_DIR.mkdir(parents=True, exist_ok=True)
+        entries_by_filter: dict[tuple[str, str], list[SiteEntry]] = defaultdict(list)
+        for entry in self.entries:
+            entries_by_filter[(entry.site, entry.filter_name)].append(entry)
+            self.site_filters.setdefault(entry.site, set()).add(entry.filter_name)
+
+        for site_name, filters in self.site_filters.items():
+            for filter_name in filters:
+                self._ensure_filter_files(site_name, filter_name)
+                urls = sorted({entry.url for entry in entries_by_filter.get((site_name, filter_name), [])})
+                self._links_path(site_name, filter_name).write_text(
+                    ("\n".join(urls) + "\n") if urls else "",
+                    encoding="utf-8",
+                )
 
     def get_site_names(self) -> list[str]:
-        return sorted({entry.site for entry in self.entries})
+        return sorted(self.site_filters)
 
     def get_filters_for_site(self, site_name: str) -> list[str]:
-        return sorted({entry.filter_name for entry in self.entries if entry.site == site_name})
+        return sorted(self.site_filters.get(site_name, set()))
 
     def get_matching_entries(self, site_name: str, filter_name: str) -> list[SiteEntry]:
         return [
@@ -63,13 +108,19 @@ class CatalogStore:
             if entry.site == site_name and entry.filter_name == filter_name
         ]
 
+    def get_entry_count_for_site(self, site_name: str) -> int:
+        return sum(1 for entry in self.entries if entry.site == site_name)
+
     def get_grouped_summary(self) -> dict[str, list[SiteEntry]]:
         grouped: dict[str, list[SiteEntry]] = defaultdict(list)
+        for site_name in self.site_filters:
+            grouped[site_name] = []
         for entry in self.entries:
             grouped[entry.site].append(entry)
         return dict(sorted(grouped.items()))
 
     def add_entry(self, entry: SiteEntry) -> str:
+        self.site_filters.setdefault(entry.site, set()).add(entry.filter_name)
         existing = next((item for item in self.entries if item.id == entry.id), None)
         if existing:
             existing.site = entry.site
@@ -131,6 +182,35 @@ class CatalogStore:
 
         reader = csv.DictReader(io.StringIO(text))
         return [row for row in reader]
+
+    def _site_path(self, site_name: str) -> Path:
+        return SITES_DIR / site_name
+
+    def _filter_path(self, site_name: str, filter_name: str) -> Path:
+        return self._site_path(site_name) / filter_name
+
+    def _links_path(self, site_name: str, filter_name: str) -> Path:
+        return self._filter_path(site_name, filter_name) / LINKS_FILENAME
+
+    def _placeholder_path(self, site_name: str, filter_name: str) -> Path:
+        return self._filter_path(site_name, filter_name) / PLACEHOLDER_FILENAME
+
+    def _ensure_filter_files(self, site_name: str, filter_name: str) -> None:
+        filter_path = self._filter_path(site_name, filter_name)
+        filter_path.mkdir(parents=True, exist_ok=True)
+
+        links_path = self._links_path(site_name, filter_name)
+        if not links_path.exists():
+            links_path.write_text("", encoding="utf-8")
+
+        placeholder_path = self._placeholder_path(site_name, filter_name)
+        if not placeholder_path.exists():
+            placeholder_path.write_text(PLACEHOLDER_TEXT, encoding="utf-8")
+
+    def _read_links_file(self, links_path: Path) -> list[str]:
+        if not links_path.exists():
+            return []
+        return [line.strip() for line in links_path.read_text(encoding="utf-8").splitlines() if line.strip()]
 
 
 catalog_store = CatalogStore()

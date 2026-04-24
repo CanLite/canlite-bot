@@ -19,7 +19,7 @@ from .database import (
 )
 from .models import SiteEntry
 from .utils import parse_tags, slugify
-from .views import DispenserView, build_dispenser_embed
+from .views import DispenserLauncherView, build_dispenser_launcher_embed
 from .xp import XP_COOLDOWN_SECONDS, apply_message_xp, ensure_xp_store, load_xp_store, save_xp_store, xp_needed_for_level
 
 
@@ -76,6 +76,7 @@ async def assign_linked_role(interaction: discord.Interaction) -> tuple[bool, st
 async def setup_hook() -> None:
     bot.db_pool = await create_pool()
     ensure_xp_store()
+    bot.add_view(DispenserLauncherView())
 
     if DISCORD_GUILD_ID:
         guild = discord.Object(id=int(DISCORD_GUILD_ID))
@@ -152,11 +153,9 @@ async def link_command(interaction: discord.Interaction, code: str) -> None:
 
 @bot.tree.command(name="dispense", description="Pick a site and filter, then get one URL privately.")
 async def dispense_command(interaction: discord.Interaction) -> None:
-    view = DispenserView(owner_id=interaction.user.id)
     await interaction.response.send_message(
-        embed=build_dispenser_embed(None, None),
-        view=view,
-        ephemeral=True,
+        embed=build_dispenser_launcher_embed(),
+        view=DispenserLauncherView(),
     )
 
 
@@ -315,15 +314,16 @@ async def remove_link_command(interaction: discord.Interaction, link_id: str) ->
 @bot.tree.command(name="list-links", description="List the current dispenser catalog grouped by site.")
 @app_commands.check(is_catalog_admin)
 async def list_links_command(interaction: discord.Interaction) -> None:
-    grouped = catalog_store.get_grouped_summary()
-    if not grouped:
+    site_names = catalog_store.get_site_names()
+    if not site_names:
         await interaction.response.send_message("The catalog is empty.", ephemeral=True)
         return
 
     lines = []
-    for site_name, entries in list(grouped.items())[:20]:
-        filter_names = sorted({entry.filter_name for entry in entries})
-        lines.append(f"{site_name} - {len(entries)} urls - filters: {', '.join(filter_names[:6])}")
+    for site_name in site_names[:20]:
+        filter_names = catalog_store.get_filters_for_site(site_name)
+        url_count = catalog_store.get_entry_count_for_site(site_name)
+        lines.append(f"{site_name} - {url_count} urls - filters: {', '.join(filter_names[:6])}")
 
     embed = discord.Embed(title="Dispenser Catalog", description="\n".join(lines), color=discord.Color.green())
     await interaction.response.send_message(embed=embed, ephemeral=True)
