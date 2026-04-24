@@ -19,7 +19,7 @@ from .database import (
 )
 from .models import SiteEntry
 from .utils import parse_tags, slugify
-from .views import DispenserView, build_dispenser_embed
+from .views import SiteDispenserView, build_dispenser_embed
 from .xp import XP_COOLDOWN_SECONDS, apply_message_xp, ensure_xp_store, load_xp_store, save_xp_store, xp_needed_for_level
 
 
@@ -76,7 +76,7 @@ async def assign_linked_role(interaction: discord.Interaction) -> tuple[bool, st
 async def setup_hook() -> None:
     bot.db_pool = await create_pool()
     ensure_xp_store()
-    bot.add_view(DispenserView())
+    bot.add_view(SiteDispenserView())
 
     if DISCORD_GUILD_ID:
         guild = discord.Object(id=int(DISCORD_GUILD_ID))
@@ -154,8 +154,8 @@ async def link_command(interaction: discord.Interaction, code: str) -> None:
 @bot.tree.command(name="dispense", description="Pick a site and filter, then get one URL privately.")
 async def dispense_command(interaction: discord.Interaction) -> None:
     await interaction.response.send_message(
-        embed=build_dispenser_embed(None, None),
-        view=DispenserView(),
+        embed=build_dispenser_embed(),
+        view=SiteDispenserView(),
     )
 
 
