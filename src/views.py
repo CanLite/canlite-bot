@@ -6,19 +6,7 @@ from .catalog import catalog_store
 from .utils import titleize
 
 
-def build_dispenser_launcher_embed() -> discord.Embed:
-    site_count = len(catalog_store.get_site_names())
-
-    embed = discord.Embed(
-        title="CanLite Link Dispenser",
-        description="Use the button below to open your own private dispenser. Pick a site and filter there, and the bot will send you one matching URL privately.",
-        color=discord.Color.from_rgb(116, 217, 182),
-    )
-    embed.add_field(name="Catalog", value=f"{site_count} sites available", inline=False)
-    return embed
-
-
-def build_dispenser_embed(selected_site: str | None, selected_filter: str | None, generated_url: str | None = None) -> discord.Embed:
+def build_dispenser_embed(selected_site: str | None, selected_filter: str | None) -> discord.Embed:
     site_count = len(catalog_store.get_site_names())
     filter_count = len(catalog_store.get_filters_for_site(selected_site)) if selected_site else 0
 
@@ -31,9 +19,6 @@ def build_dispenser_embed(selected_site: str | None, selected_filter: str | None
     embed.add_field(name="Filter", value=selected_filter or "Not selected", inline=True)
     embed.add_field(name="Catalog", value=f"{site_count} sites, {filter_count} filters for current site", inline=False)
 
-    if generated_url:
-        embed.add_field(name="Your URL", value=generated_url, inline=False)
-
     return embed
 
 
@@ -44,19 +29,19 @@ class SiteSelect(discord.ui.Select):
             for site_name in catalog_store.get_site_names()[:25]
         ] or [discord.SelectOption(label="No sites loaded", value="__none__")]
 
-        super().__init__(placeholder="Choose a site", options=options, row=0)
+        super().__init__(placeholder="Choose a site", options=options, row=0, custom_id="canlite:site-select")
 
     async def callback(self, interaction: discord.Interaction) -> None:
-        if not isinstance(self.view, DispenserView):
+        view = self.view
+        if not isinstance(view, DispenserView):
             await interaction.response.send_message("This dispenser is no longer active. Open a new one from /dispense.", ephemeral=True)
             return
-        self.view.selected_site = self.values[0] if self.values[0] != "__none__" else None
-        self.view.selected_filter = None
-        self.view.generated_url = None
-        self.view.refresh_items()
+        view.selected_site = self.values[0] if self.values[0] != "__none__" else None
+        view.selected_filter = None
+        view.refresh_items()
         await interaction.response.edit_message(
-            embed=build_dispenser_embed(self.view.selected_site, self.view.selected_filter),
-            view=self.view,
+            embed=build_dispenser_embed(view.selected_site, view.selected_filter),
+            view=view,
         )
 
 
@@ -73,84 +58,54 @@ class FilterSelect(discord.ui.Select):
             options=options,
             row=1,
             disabled=not bool(filters),
+            custom_id="canlite:filter-select",
         )
 
     async def callback(self, interaction: discord.Interaction) -> None:
-        if not isinstance(self.view, DispenserView):
+        view = self.view
+        if not isinstance(view, DispenserView):
             await interaction.response.send_message("This dispenser is no longer active. Open a new one from /dispense.", ephemeral=True)
             return
-        self.view.selected_filter = self.values[0] if self.values[0] != "__none__" else None
-        self.view.generated_url = None
+        view.selected_filter = self.values[0] if self.values[0] != "__none__" else None
         await interaction.response.edit_message(
-            embed=build_dispenser_embed(self.view.selected_site, self.view.selected_filter),
-            view=self.view,
+            embed=build_dispenser_embed(view.selected_site, view.selected_filter),
+            view=view,
         )
 
 
 class GenerateButton(discord.ui.Button):
     def __init__(self, enabled: bool) -> None:
-        super().__init__(label="Generate URL", style=discord.ButtonStyle.success, disabled=not enabled, row=2)
+        super().__init__(
+            label="Generate URL",
+            style=discord.ButtonStyle.success,
+            disabled=not enabled,
+            row=2,
+            custom_id="canlite:generate-url",
+        )
 
     async def callback(self, interaction: discord.Interaction) -> None:
-        if not isinstance(self.view, DispenserView):
+        view = self.view
+        if not isinstance(view, DispenserView):
             await interaction.response.send_message("This dispenser is no longer active. Open a new one from /dispense.", ephemeral=True)
             return
-        matches = catalog_store.get_matching_entries(self.view.selected_site, self.view.selected_filter)
+        matches = catalog_store.get_matching_entries(view.selected_site, view.selected_filter)
         if not matches:
             await interaction.response.send_message("No URLs match that site and filter.", ephemeral=True)
             return
 
         chosen = random.choice(matches)
-        self.view.generated_url = chosen.url
-        await interaction.response.edit_message(
-            embed=build_dispenser_embed(self.view.selected_site, self.view.selected_filter, chosen.url),
-            view=self.view,
-        )
+        await interaction.response.send_message(chosen.url, ephemeral=True)
 
 
 class DispenserView(discord.ui.View):
-    def __init__(self, owner_id: int) -> None:
-        super().__init__(timeout=1800)
-        self.owner_id = owner_id
+    def __init__(self) -> None:
+        super().__init__(timeout=None)
         self.selected_site: str | None = None
         self.selected_filter: str | None = None
-        self.generated_url: str | None = None
         self.refresh_items()
-
-    async def interaction_check(self, interaction: discord.Interaction) -> bool:
-        if interaction.user.id != self.owner_id:
-            await interaction.response.send_message("Only the person who opened this dispenser can use it.", ephemeral=True)
-            return False
-        return True
 
     def refresh_items(self) -> None:
         self.clear_items()
         self.add_item(SiteSelect(self.selected_site))
         self.add_item(FilterSelect(self.selected_site, self.selected_filter))
         self.add_item(GenerateButton(enabled=bool(self.selected_site and self.selected_filter)))
-
-    async def on_timeout(self) -> None:
-        self.clear_items()
-
-
-class OpenDispenserButton(discord.ui.Button):
-    def __init__(self) -> None:
-        super().__init__(
-            label="Open Private Dispenser",
-            style=discord.ButtonStyle.success,
-            custom_id="canlite:open-dispenser",
-        )
-
-    async def callback(self, interaction: discord.Interaction) -> None:
-        view = DispenserView(owner_id=interaction.user.id)
-        await interaction.response.send_message(
-            embed=build_dispenser_embed(None, None),
-            view=view,
-            ephemeral=True,
-        )
-
-
-class DispenserLauncherView(discord.ui.View):
-    def __init__(self) -> None:
-        super().__init__(timeout=None)
-        self.add_item(OpenDispenserButton())
