@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 import time
 
 import discord
@@ -14,6 +13,7 @@ from .database import (
     claim_link_code,
     create_pool,
     get_credit_balance_for_discord_user,
+    list_private_links_for_owner,
     grant_level_up_credit,
     remove_private_link_member,
 )
@@ -36,6 +36,38 @@ intents.message_content = True
 bot = commands.Bot(command_prefix="!", intents=intents)
 bot.db_pool = None
 bot.xp_cooldowns: dict[str, float] = {}
+
+
+def build_private_link_dm_embed(result: dict[str, object]) -> discord.Embed:
+    domain = str(result.get("link_domain") or "Private Link")
+    embed = discord.Embed(
+        title="Private Link Access Granted",
+        description=f"You were added to `{domain}`.",
+        color=discord.Color.blue(),
+    )
+    embed.add_field(name="Domain", value=domain, inline=False)
+    embed.add_field(name="Cover URL", value=str(result.get("cover_url") or "Not set"), inline=False)
+    embed.add_field(name="Login Path", value=str(result.get("login_path") or "Not set"), inline=False)
+    embed.add_field(name="Cost", value=f"{float(result.get('monthly_cost_credits') or 0):.2f} credits/month", inline=False)
+    return embed
+
+
+async def try_send_private_link_dm(result: dict[str, object]) -> str | None:
+    target_discord_user_id = result.get("target_discord_user_id")
+    if not target_discord_user_id:
+        return None
+
+    try:
+        user = bot.get_user(int(target_discord_user_id)) or await bot.fetch_user(int(target_discord_user_id))
+    except (ValueError, discord.HTTPException):
+        return "Invite added, but I could not fetch the linked Discord user to DM them."
+
+    try:
+        await user.send(embed=build_private_link_dm_embed(result))
+    except discord.HTTPException:
+        return "Invite added, but I could not deliver the DM to the linked Discord account."
+
+    return None
 
 
 async def assign_linked_role(interaction: discord.Interaction) -> tuple[bool, str | None]:
@@ -165,7 +197,18 @@ async def dispense_command(interaction: discord.Interaction) -> None:
 @app_commands.describe(domain="The private-link domain you own.", identifier="Email, Discord @name, mention, or Discord ID.")
 async def private_add_command(interaction: discord.Interaction, domain: str, identifier: str) -> None:
     await interaction.response.defer(ephemeral=True, thinking=True)
-    ok, message = await add_private_link_member(bot.db_pool, interaction.user.id, domain, identifier)
+    ok, result = await add_private_link_member(bot.db_pool, interaction.user.id, domain, identifier)
+    if not ok:
+        await interaction.followup.send(str(result), ephemeral=True)
+        return
+
+    payload = result if isinstance(result, dict) else {"message": str(result)}
+    dm_note = await try_send_private_link_dm(payload)
+    message = str(payload.get("message") or "Private link member added.")
+    if dm_note:
+        message = f"{message} {dm_note}"
+    elif payload.get("target_discord_user_id"):
+        message = f"{message} The linked Discord user was notified by DM."
     await interaction.followup.send(message, ephemeral=True)
 
 
@@ -175,6 +218,30 @@ async def private_remove_command(interaction: discord.Interaction, domain: str, 
     await interaction.response.defer(ephemeral=True, thinking=True)
     ok, message = await remove_private_link_member(bot.db_pool, interaction.user.id, domain, identifier)
     await interaction.followup.send(message, ephemeral=True)
+
+
+@bot.tree.command(name="private-list", description="List the private links on your linked CanLite account.")
+async def private_list_command(interaction: discord.Interaction) -> None:
+    await interaction.response.defer(ephemeral=True, thinking=True)
+    ok, result = await list_private_links_for_owner(bot.db_pool, interaction.user.id)
+    if not ok:
+        await interaction.followup.send(str(result), ephemeral=True)
+        return
+
+    links = result if isinstance(result, list) else []
+    if not links:
+        await interaction.followup.send("No private links were found on your linked CanLite account.", ephemeral=True)
+        return
+
+    lines = [f"`{item['domain']}` - {item['member_count']} member(s)" for item in links[:20]]
+    embed = discord.Embed(
+        title="Your Private Links",
+        description="\n".join(lines),
+        color=discord.Color.blurple(),
+    )
+    if len(links) > 20:
+        embed.add_field(name="More", value=f"{len(links) - 20} additional link(s) not shown.", inline=False)
+    await interaction.followup.send(embed=embed, ephemeral=True)
 
 
 @bot.tree.command(name="rank", description="Show your XP, level, and message count.")

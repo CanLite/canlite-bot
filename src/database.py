@@ -231,7 +231,7 @@ async def add_private_link_member(
     owner_discord_user_id: int,
     domain: str,
     identifier: str,
-) -> tuple[bool, str]:
+) -> tuple[bool, dict | str]:
     owner_user_id = await get_linked_canlite_user_id(pool, owner_discord_user_id)
     if owner_user_id is None:
         return False, f"Link your Discord account first from {CANLITE_ACCOUNT_URL}."
@@ -240,7 +240,11 @@ async def add_private_link_member(
         async with conn.transaction():
             link = await conn.fetchrow(
                 """
-                SELECT id, domain
+                SELECT id,
+                       domain,
+                       cover_url,
+                       login_path,
+                       monthly_cost_credits
                 FROM private_links
                 WHERE owner_user_id = $1
                   AND lower(domain) = $2
@@ -286,7 +290,15 @@ async def add_private_link_member(
                 target_user["id"],
                 owner_user_id,
             )
-            return True, f"Added {target_user['email']} to {link['domain']}."
+            return True, {
+                "message": f"Added {target_user['email']} to {link['domain']}.",
+                "target_email": str(target_user["email"]),
+                "target_discord_user_id": str(target_user["discord_user_id"] or "").strip() or None,
+                "link_domain": str(link["domain"]),
+                "cover_url": str(link["cover_url"]),
+                "login_path": str(link["login_path"]),
+                "monthly_cost_credits": float(link["monthly_cost_credits"]),
+            }
 
 
 async def remove_private_link_member(
@@ -331,6 +343,32 @@ async def remove_private_link_member(
                 return False, "That account did not have access to the private link."
 
             return True, f"Removed {target_user['email']} from {link['domain']}."
+
+
+async def list_private_links_for_owner(pool: asyncpg.Pool, owner_discord_user_id: int) -> tuple[bool, list[dict] | str]:
+    owner_user_id = await get_linked_canlite_user_id(pool, owner_discord_user_id)
+    if owner_user_id is None:
+        return False, f"Link your Discord account first from {CANLITE_ACCOUNT_URL}."
+
+    rows = await pool.fetch(
+        """
+        SELECT private_links.domain,
+               COUNT(private_link_members.user_id) AS member_count
+        FROM private_links
+        LEFT JOIN private_link_members ON private_link_members.link_id = private_links.id
+        WHERE private_links.owner_user_id = $1
+        GROUP BY private_links.id, private_links.domain
+        ORDER BY lower(private_links.domain)
+        """,
+        owner_user_id,
+    )
+    return True, [
+        {
+            "domain": str(row["domain"]),
+            "member_count": int(row["member_count"] or 0),
+        }
+        for row in rows
+    ]
 
 
 async def grant_level_up_credit(pool: asyncpg.Pool, discord_user_id: int) -> tuple[bool, float | None]:

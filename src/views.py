@@ -18,7 +18,6 @@ def build_dispenser_embed() -> discord.Embed:
     )
     embed.add_field(name="Catalog", value=f"{site_count} sites available", inline=True)
     embed.add_field(name="Limit", value=f"{DISPENSE_LIMIT} links per member", inline=True)
-    embed.set_footer(text="Links are delivered privately. Moderator resets are supported.")
     return embed
 
 
@@ -34,7 +33,6 @@ def build_private_dispenser_embed(selected_site: str, selected_filter: str | Non
     embed.add_field(name="Filter", value=selected_filter or "Not selected", inline=True)
     embed.add_field(name="Remaining", value=f"{remaining_uses}/{DISPENSE_LIMIT}", inline=True)
     embed.add_field(name="Catalog", value=f"{filter_count} filters for this site", inline=False)
-    embed.set_footer(text="Your selection and generated link stay visible only to you.")
     return embed
 
 
@@ -160,7 +158,6 @@ class GenerateButton(discord.ui.Button):
         result_embed.add_field(name="Site", value=view.selected_site, inline=True)
         result_embed.add_field(name="Filter", value=titleize(view.selected_filter or "not-selected"), inline=True)
         result_embed.add_field(name="Remaining", value=f"{usage['remaining']}/{DISPENSE_LIMIT}", inline=True)
-        result_embed.set_footer(text="This message is only visible to you.")
         await interaction.response.send_message(embed=result_embed, ephemeral=True)
         await send_dispense_log(interaction, view.selected_site, view.selected_filter or "", chosen.url, usage["remaining"])
 
