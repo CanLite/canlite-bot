@@ -149,7 +149,7 @@ async def on_message(message: discord.Message) -> None:
         if granted and balance is not None:
             credit_note = f" They also got {LEVEL_UP_CREDIT_REWARD} CanLite credit and now have {balance} credits."
         else:
-            credit_note = f" Link their CanLite account to receive the {LEVEL_UP_CREDIT_REWARD}-credit level reward."
+            credit_note = f" Link your CanLite account to receive the {LEVEL_UP_CREDIT_REWARD}-credit level reward."
 
         await message.channel.send(
             f"{message.author.mention} reached level {progress['current_level']} and now has {progress['xp']} XP.{credit_note}"

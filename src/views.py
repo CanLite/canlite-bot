@@ -1,19 +1,39 @@
-import random
+import asyncio
+import json
+from urllib.parse import urlencode
+from urllib.request import urlopen
 
 import discord
 
-from .catalog import catalog_store
 from .config import DISPENSE_LIMIT, DISPENSE_LOG_CHANNEL_ID
 from .dispense_usage import get_remaining_count, record_dispense
 from .utils import slugify, titleize
 
+DISPENSER_SITE_TYPES = {
+    "CanLite": "canlite",
+    "BrunysIXL": "brunysixl",
+}
+
+DISPENSER_FILTERS = [
+    "blocksi",
+    "cisco",
+    "iboss",
+    "lanschool",
+    "lightspeed",
+    "linewize",
+    "senso",
+]
+
+GENERATOR_BASE_URL = "http://127.0.0.1:8080/generate"
+GENERATOR_IP = "104.36.85.249"
+
 
 def build_dispenser_embed() -> discord.Embed:
-    site_count = len(catalog_store.get_site_names())
+    site_count = len(DISPENSER_SITE_TYPES)
 
     embed = discord.Embed(
         title="CanLite Link Dispenser",
-        description="Choose a site below. The filter picker opens privately, and each member gets 3 links until a moderator resets them.",
+        description="Choose a site below.",
         color=discord.Color.from_rgb(116, 217, 182),
     )
     embed.add_field(name="Catalog", value=f"{site_count} sites available", inline=True)
@@ -22,11 +42,11 @@ def build_dispenser_embed() -> discord.Embed:
 
 
 def build_private_dispenser_embed(selected_site: str, selected_filter: str | None, remaining_uses: int) -> discord.Embed:
-    filter_count = len(catalog_store.get_filters_for_site(selected_site))
+    filter_count = len(DISPENSER_FILTERS)
 
     embed = discord.Embed(
         title="CanLite Link Dispenser",
-        description="Choose a filter, then generate one matching URL privately.",
+        description="Choose a filter",
         color=discord.Color.from_rgb(116, 217, 182),
     )
     embed.add_field(name="Site", value=selected_site, inline=True)
@@ -34,6 +54,68 @@ def build_private_dispenser_embed(selected_site: str, selected_filter: str | Non
     embed.add_field(name="Remaining", value=f"{remaining_uses}/{DISPENSE_LIMIT}", inline=True)
     embed.add_field(name="Catalog", value=f"{filter_count} filters for this site", inline=False)
     return embed
+
+
+def build_generation_pending_embed(selected_site: str, selected_filter: str, remaining_uses: int) -> discord.Embed:
+    embed = discord.Embed(
+        title="Generating Link",
+        description="Your link is being generated now. This might take a bit.",
+        color=discord.Color.blurple(),
+    )
+    embed.add_field(name="Site", value=selected_site, inline=True)
+    embed.add_field(name="Filter", value=titleize(selected_filter), inline=True)
+    embed.add_field(name="Remaining", value=f"{remaining_uses}/{DISPENSE_LIMIT}", inline=True)
+    return embed
+
+
+def build_generation_result_embed(selected_site: str, selected_filter: str, generated_url: str, remaining_uses: int) -> discord.Embed:
+    embed = discord.Embed(
+        title="Your Link",
+        description=generated_url,
+        color=discord.Color.green(),
+    )
+    embed.add_field(name="Site", value=selected_site, inline=True)
+    embed.add_field(name="Filter", value=titleize(selected_filter), inline=True)
+    embed.add_field(name="Remaining", value=f"{remaining_uses}/{DISPENSE_LIMIT}", inline=True)
+    return embed
+
+
+def build_generation_error_embed(selected_site: str, selected_filter: str, remaining_uses: int, message: str) -> discord.Embed:
+    embed = discord.Embed(
+        title="Generation Failed",
+        description=message,
+        color=discord.Color.red(),
+    )
+    embed.add_field(name="Site", value=selected_site, inline=True)
+    embed.add_field(name="Filter", value=titleize(selected_filter), inline=True)
+    embed.add_field(name="Remaining", value=f"{remaining_uses}/{DISPENSE_LIMIT}", inline=True)
+    return embed
+
+
+def _generate_link_sync(selected_site: str, selected_filter: str) -> str:
+    link_type = DISPENSER_SITE_TYPES.get(selected_site)
+    if not link_type:
+        raise ValueError("That site is not configured for link generation.")
+
+    query = urlencode(
+        {
+            "ip": GENERATOR_IP,
+            "blocker": selected_filter,
+            "linktype": link_type,
+        }
+    )
+    request_url = f"{GENERATOR_BASE_URL}?{query}"
+    with urlopen(request_url, timeout=60) as response:
+        payload = json.loads(response.read().decode("utf-8"))
+
+    generated_url = str(payload.get("url") or "").strip()
+    if not generated_url:
+        raise ValueError("Generator returned an invalid response.")
+    return generated_url
+
+
+async def generate_link(selected_site: str, selected_filter: str) -> str:
+    return await asyncio.to_thread(_generate_link_sync, selected_site, selected_filter)
 
 
 async def send_dispense_log(
@@ -79,7 +161,7 @@ class SiteButton(discord.ui.Button):
         self.site_name = site_name
 
     async def callback(self, interaction: discord.Interaction) -> None:
-        filters = catalog_store.get_filters_for_site(self.site_name)
+        filters = DISPENSER_FILTERS
         if not filters:
             await interaction.response.send_message("That site has no filters configured yet.", ephemeral=True)
             return
@@ -95,7 +177,7 @@ class SiteButton(discord.ui.Button):
 
 class FilterSelect(discord.ui.Select):
     def __init__(self, selected_site: str, selected_filter: str | None) -> None:
-        filters = catalog_store.get_filters_for_site(selected_site)
+        filters = DISPENSER_FILTERS
         options = [
             discord.SelectOption(label=titleize(filter_name)[:100], value=filter_name, default=filter_name == selected_filter)
             for filter_name in filters[:25]
@@ -143,23 +225,30 @@ class GenerateButton(discord.ui.Button):
                 ephemeral=True,
             )
             return
-        matches = catalog_store.get_matching_entries(view.selected_site, view.selected_filter)
-        if not matches:
-            await interaction.response.send_message("No URLs match that site and filter.", ephemeral=True)
+        selected_filter = view.selected_filter or ""
+        await interaction.response.send_message(
+            embed=build_generation_pending_embed(view.selected_site, selected_filter, remaining_before),
+            ephemeral=True,
+        )
+
+        try:
+            generated_url = await generate_link(view.selected_site, selected_filter)
+        except Exception as exc:
+            await interaction.edit_original_response(
+                embed=build_generation_error_embed(
+                    view.selected_site,
+                    selected_filter,
+                    remaining_before,
+                    f"Could not generate a link right now: {exc}",
+                )
+            )
             return
 
-        chosen = random.choice(matches)
         usage = record_dispense(interaction.guild_id, interaction.user.id)
-        result_embed = discord.Embed(
-            title="Your Link",
-            description=chosen.url,
-            color=discord.Color.green(),
+        await interaction.edit_original_response(
+            embed=build_generation_result_embed(view.selected_site, selected_filter, generated_url, usage["remaining"])
         )
-        result_embed.add_field(name="Site", value=view.selected_site, inline=True)
-        result_embed.add_field(name="Filter", value=titleize(view.selected_filter or "not-selected"), inline=True)
-        result_embed.add_field(name="Remaining", value=f"{usage['remaining']}/{DISPENSE_LIMIT}", inline=True)
-        await interaction.response.send_message(embed=result_embed, ephemeral=True)
-        await send_dispense_log(interaction, view.selected_site, view.selected_filter or "", chosen.url, usage["remaining"])
+        await send_dispense_log(interaction, view.selected_site, selected_filter, generated_url, usage["remaining"])
 
 
 class PrivateDispenserView(discord.ui.View):
@@ -178,5 +267,5 @@ class PrivateDispenserView(discord.ui.View):
 class SiteDispenserView(discord.ui.View):
     def __init__(self) -> None:
         super().__init__(timeout=None)
-        for index, site_name in enumerate(catalog_store.get_site_names()[:25]):
+        for index, site_name in enumerate(list(DISPENSER_SITE_TYPES)[:25]):
             self.add_item(SiteButton(site_name, row=index // 5))
