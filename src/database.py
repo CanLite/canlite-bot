@@ -274,7 +274,7 @@ async def save_private_link_for_owner(
         return False, "That domain cannot be used as a private link."
 
     if not is_valid_http_url(normalized_cover_url):
-        return False, "Enter a real cover site URL starting with `http://` or `https://`."
+        return False, "Enter a real cover link starting with `http://` or `https://`."
 
     if not is_valid_private_link_path(normalized_login_path):
         return False, "Your login path must start with `/` and only use letters, numbers, `-`, `_`, or `/`."

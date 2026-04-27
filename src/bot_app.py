@@ -22,7 +22,7 @@ from .database import (
 from .dispense_usage import ensure_dispense_usage_store, reset_guild_dispense, reset_user_dispense
 from .models import SiteEntry
 from .utils import parse_tags, slugify
-from .views import SiteDispenserView, build_dispenser_embed
+from .views import DISPENSER_FILTERS, DISPENSER_SITE_TYPES, SiteDispenserView, build_dispenser_embed, create_private_link
 from .xp import XP_COOLDOWN_SECONDS, apply_message_xp, ensure_xp_store, load_xp_store, save_xp_store, xp_needed_for_level
 
 
@@ -49,7 +49,7 @@ def build_private_link_dm_embed(result: dict[str, object]) -> discord.Embed:
         color=discord.Color.blue(),
     )
     embed.add_field(name="Domain", value="https://" + str(domain), inline=False)
-    embed.add_field(name="Cover Site", value=str(result.get("cover_url") or "Not set"), inline=False)
+    embed.add_field(name="Cover Link", value=str(result.get("cover_url") or "Not set"), inline=False)
     embed.add_field(name="Login Path", value="https://" + str(domain) + str(result.get("login_path") or "Not set"), inline=False)
     embed.add_field(name="Cost", value=f"{float(result.get('monthly_cost_credits') or 0):.2f} credits/month", inline=False)
     return embed
@@ -70,10 +70,10 @@ def build_private_link_owner_dm_embed(result: dict[str, object]) -> discord.Embe
     if login_path and domain:
         embed.add_field(name="Login URL", value=f"https://{domain}{login_path}", inline=False)
     if cover_url:
-        embed.add_field(name="Cover Site", value=cover_url, inline=False)
+        embed.add_field(name="Cover Link", value=cover_url, inline=False)
     embed.add_field(
         name="How It Works",
-        value="People see the cover site first. You use the login URL when you want the private CanLite page.",
+        value="People see the cover link first. You use the login URL when you want the private CanLite page.",
         inline=False,
     )
     return embed
@@ -267,7 +267,7 @@ async def private_list_command(interaction: discord.Interaction) -> None:
     links = result if isinstance(result, list) else []
     if not links:
         await interaction.followup.send(
-            "No private links yet.\n\nStart with `/private-create` and fill in:\n- a brand-new domain\n- a secret login path\n- a normal-looking cover site",
+            "No private links yet.\n\nStart with `/private-create` and fill in:\n- a brand-new domain\n- a secret login path\n- a specific cover link, or a generated one",
             ephemeral=True,
         )
         return
@@ -280,7 +280,7 @@ async def private_list_command(interaction: discord.Interaction) -> None:
     )
     embed.add_field(
         name="Setup Reminder",
-        value="Use a brand-new domain, choose a secret login path, and pick a normal-looking cover site.",
+        value="Use a brand-new domain, choose a secret login path, and choose either a specific cover link or a generated one.",
         inline=False,
     )
     if len(links) > 20:
@@ -292,13 +292,21 @@ async def private_list_command(interaction: discord.Interaction) -> None:
 @app_commands.describe(
     domain="A brand-new domain or subdomain you control, like study.example.com.",
     login_path="A secret path like /school or /notes that opens your CanLite login page.",
-    cover_url="The normal site people should see before they use your login path.",
+    cover_url="Optional: a specific cover link to use.",
+    site="Optional: choose a site if you want CanLite to generate the cover link.",
+    filter_name="Optional: choose a filter if you want CanLite to generate the cover link.",
+)
+@app_commands.choices(
+    site=[app_commands.Choice(name=site_name, value=site_name) for site_name in DISPENSER_SITE_TYPES],
+    filter_name=[app_commands.Choice(name=filter_value.title(), value=filter_value) for filter_value in DISPENSER_FILTERS],
 )
 async def private_create_command(
     interaction: discord.Interaction,
     domain: str,
     login_path: str,
-    cover_url: str,
+    cover_url: str | None = None,
+    site: str | None = None,
+    filter_name: str | None = None,
 ) -> None:
     await interaction.response.defer(ephemeral=True, thinking=True)
 
@@ -313,13 +321,36 @@ async def private_create_command(
         )
         return
 
+    provided_cover_url = (cover_url or "").strip()
+    selected_site = (site or "").strip()
+    selected_filter = (filter_name or "").strip().lower()
+    if not provided_cover_url and (not selected_site or not selected_filter):
+        await interaction.followup.send(
+            "Choose one cover-link method:\n- set `cover_url`, or\n- set both `site` and `filter_name` so I can generate one from `127.0.0.1:8080`.",
+            ephemeral=True,
+        )
+        return
+
+    try:
+        cover_result = await create_private_link(
+            url=provided_cover_url or None,
+            site=selected_site or None,
+            filter_name=selected_filter or None,
+        )
+    except Exception as exc:
+        await interaction.followup.send(f"Could not build the cover link right now: {exc}", ephemeral=True)
+        return
+
+    resolved_cover_url = str(cover_result.get("url") or "").strip()
+    cover_source = "specific link" if provided_cover_url else f"generated {selected_site} / {selected_filter}"
+
     try:
         ok, result = await save_private_link_for_owner(
             bot.db_pool,
             bot.route_db_pool,
             interaction.user.id,
             domain=domain,
-            cover_url=cover_url,
+            cover_url=resolved_cover_url,
             login_path=login_path,
         )
     except Exception as exc:
@@ -338,9 +369,10 @@ async def private_create_command(
     message = (
         f"Private link saved for `https://{saved_domain}`.\n\n"
         f"Login URL: `https://{saved_domain}{saved_login_path}`\n"
-        f"Cover site: `{payload.get('cover_url')}`\n\n"
+        f"Cover link: `{payload.get('cover_url')}`\n"
+        f"Cover link source: `{cover_source}`\n\n"
         "The login URL is the secret one you use to open the private CanLite page.\n"
-        "Anyone who visits the main domain normally will see the cover site instead."
+        "Anyone who visits the main domain normally will see the cover link instead."
     )
     if dm_note:
         message += f"\n\n{dm_note}"
@@ -352,7 +384,7 @@ async def private_create_command(
 @bot.tree.command(name="private-help", description="Show a simple guide for setting up a real CanLite private link.")
 async def private_help_command(interaction: discord.Interaction) -> None:
     embed = discord.Embed(title="Private Link Setup", color=discord.Color.blurple())
-    embed.description = "A private link is your own domain that hides CanLite behind a normal-looking cover site."
+    embed.description = "A private link is your own domain that hides CanLite behind a normal-looking cover link."
     embed.add_field(
         name="Step 1",
         value=f"Link your Discord account from {CANLITE_ACCOUNT_URL}.",
@@ -365,12 +397,17 @@ async def private_help_command(interaction: discord.Interaction) -> None:
     )
     embed.add_field(
         name="Step 3",
-        value="Run `/private-create` with your domain, a secret login path, and a cover site.",
+        value="Run `/private-create` with your domain, a secret login path, and either a specific cover link or a generated one.",
+        inline=False,
+    )
+    embed.add_field(
+        name="Two Cover-Link Options",
+        value="Option A: set `cover_url`\nOption B: set both `site` and `filter_name` to generate one from `127.0.0.1:8080`",
         inline=False,
     )
     embed.add_field(
         name="Example",
-        value="Domain: `study.example.com`\nLogin path: `/notes`\nCover site: `https://google.com`",
+        value="Domain: `study.example.com`\nLogin path: `/notes`\nCover link: `https://google.com`",
         inline=False,
     )
     await interaction.response.send_message(embed=embed, ephemeral=True)
