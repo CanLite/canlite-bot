@@ -16,9 +16,11 @@ def require_env(name: str) -> str:
 BASE_DIR = Path(__file__).resolve().parent.parent
 DISCORD_TOKEN = require_env("DISCORD_TOKEN")
 DATABASE_URL = require_env("DATABASE_URL")
+ROUTE_DATABASE_URL = os.getenv("ROUTE_DATABASE_URL", DATABASE_URL).strip()
 CANLITE_ACCOUNT_URL = os.getenv("CANLITE_ACCOUNT_URL", "https://canlite.org/account").strip()
 DISCORD_GUILD_ID = os.getenv("DISCORD_GUILD_ID", "").strip()
 DATABASE_SSL = os.getenv("DATABASE_SSL", "false").lower() == "true"
+ROUTE_DATABASE_SSL = os.getenv("ROUTE_DATABASE_SSL", os.getenv("DATABASE_SSL", "false")).lower() == "true"
 LINKED_ROLE_ID = int(os.getenv("LINKED_ROLE_ID", "1497028527273541722"))
 
 SITES_DIR = BASE_DIR / "Sites"

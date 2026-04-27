@@ -1,10 +1,33 @@
 import json
+import re
 
 import asyncpg
 import discord
 
-from .config import CANLITE_ACCOUNT_URL, DATABASE_SSL, DATABASE_URL, FIRST_LINK_CREDIT_REWARD, LEVEL_UP_CREDIT_REWARD
+from .config import (
+    CANLITE_ACCOUNT_URL,
+    DATABASE_SSL,
+    DATABASE_URL,
+    FIRST_LINK_CREDIT_REWARD,
+    LEVEL_UP_CREDIT_REWARD,
+    ROUTE_DATABASE_SSL,
+    ROUTE_DATABASE_URL,
+)
 from .utils import parse_identifier_to_discord_id
+
+
+MAX_PRIVATE_LINKS = 5
+BLOCKED_PRIVATE_LINK_PARTS = (
+    "104.36.85.249",
+    "104-36-85-249",
+    "nip.io",
+    "sslip.io",
+    "plesk.page",
+)
+PRIVATE_LINK_DOMAIN_RE = re.compile(
+    r"^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)+$"
+)
+PRIVATE_LINK_PATH_RE = re.compile(r"^/[a-z0-9/_-]*$", re.IGNORECASE)
 
 
 def parse_credit_balance(raw_data) -> float:
@@ -28,6 +51,45 @@ def serialize_credit_balance(raw_data, credits: float) -> str:
 
 async def create_pool() -> asyncpg.Pool:
     return await asyncpg.create_pool(DATABASE_URL, ssl=True if DATABASE_SSL else None)
+
+
+async def create_route_pool() -> asyncpg.Pool:
+    return await asyncpg.create_pool(ROUTE_DATABASE_URL, ssl=True if ROUTE_DATABASE_SSL else None)
+
+
+def normalize_private_link_domain(value: str) -> str:
+    return str(value or "").strip().lower()
+
+
+def normalize_private_link_path(value: str) -> str:
+    raw = str(value or "").strip()
+    if not raw:
+        return ""
+    path = raw if raw.startswith("/") else f"/{raw}"
+    return path if len(path) == 1 else path.rstrip("/")
+
+
+def is_valid_private_link_domain(value: str) -> bool:
+    return bool(PRIVATE_LINK_DOMAIN_RE.fullmatch(normalize_private_link_domain(value)))
+
+
+def is_valid_private_link_path(value: str) -> bool:
+    return bool(PRIVATE_LINK_PATH_RE.fullmatch(normalize_private_link_path(value)))
+
+
+def is_valid_http_url(value: str) -> bool:
+    try:
+        from urllib.parse import urlparse
+
+        parsed = urlparse(str(value or "").strip())
+        return parsed.scheme in {"http", "https"} and bool(parsed.netloc)
+    except Exception:
+        return False
+
+
+def can_use_private_link_domain(domain: str) -> bool:
+    normalized = normalize_private_link_domain(domain)
+    return bool(normalized) and not any(part in normalized for part in BLOCKED_PRIVATE_LINK_PARTS)
 
 
 async def claim_link_code(
@@ -187,6 +249,138 @@ async def get_credit_balance_for_discord_user(pool: asyncpg.Pool, discord_user_i
         return False, None
 
     return True, parse_credit_balance(row["data"])
+
+
+async def save_private_link_for_owner(
+    pool: asyncpg.Pool,
+    route_pool: asyncpg.Pool,
+    owner_discord_user_id: int,
+    domain: str,
+    cover_url: str,
+    login_path: str,
+) -> tuple[bool, dict | str]:
+    owner_user_id = await get_linked_canlite_user_id(pool, owner_discord_user_id)
+    if owner_user_id is None:
+        return False, f"Link your Discord account first from {CANLITE_ACCOUNT_URL}."
+
+    normalized_domain = normalize_private_link_domain(domain)
+    normalized_cover_url = str(cover_url or "").strip()
+    normalized_login_path = normalize_private_link_path(login_path)
+
+    if not is_valid_private_link_domain(normalized_domain):
+        return False, "Enter a real domain like `study.example.com`."
+
+    if not can_use_private_link_domain(normalized_domain):
+        return False, "That domain cannot be used as a private link."
+
+    if not is_valid_http_url(normalized_cover_url):
+        return False, "Enter a real cover site URL starting with `http://` or `https://`."
+
+    if not is_valid_private_link_path(normalized_login_path):
+        return False, "Your login path must start with `/` and only use letters, numbers, `-`, `_`, or `/`."
+
+    route_table_url = f"https://{normalized_domain}"
+
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            owned_links = await conn.fetch(
+                """
+                SELECT id, domain
+                FROM private_links
+                WHERE owner_user_id = $1
+                ORDER BY created_at DESC, id DESC
+                FOR UPDATE
+                """,
+                owner_user_id,
+            )
+
+            existing_owned_link = next(
+                (row for row in owned_links if str(row["domain"]).lower() == normalized_domain),
+                None,
+            )
+
+            conflicting_domain = await conn.fetchrow(
+                """
+                SELECT id, owner_user_id
+                FROM private_links
+                WHERE domain = $1
+                FOR UPDATE
+                """,
+                normalized_domain,
+            )
+            if conflicting_domain and int(conflicting_domain["owner_user_id"]) != owner_user_id:
+                return False, "That domain is already in use."
+
+            if existing_owned_link is None:
+                existing_route = await route_pool.fetchval(
+                    "SELECT 1 FROM routestable WHERE lower(url) = $1 LIMIT 1",
+                    route_table_url,
+                )
+                if existing_route:
+                    return False, "That domain has already been used before. Private-link domains must be brand new."
+
+            if existing_owned_link:
+                await conn.execute(
+                    """
+                    UPDATE private_links
+                    SET cover_url = $1,
+                        login_path = $2,
+                        updated_at = NOW()
+                    WHERE id = $3
+                    """,
+                    normalized_cover_url,
+                    normalized_login_path,
+                    existing_owned_link["id"],
+                )
+                link_id = int(existing_owned_link["id"])
+                action = "updated"
+            else:
+                if len(owned_links) >= MAX_PRIVATE_LINKS:
+                    return False, f"You can only own up to {MAX_PRIVATE_LINKS} private links."
+
+                link_id = int(
+                    await conn.fetchval(
+                        """
+                        INSERT INTO private_links (
+                            owner_user_id,
+                            domain,
+                            cover_url,
+                            login_path,
+                            link_source,
+                            monthly_cost_credits,
+                            slush_pool_credits,
+                            provider_enabled
+                        )
+                        VALUES ($1, $2, $3, $4, 'byo', 0, 0, true)
+                        RETURNING id
+                        """,
+                        owner_user_id,
+                        normalized_domain,
+                        normalized_cover_url,
+                        normalized_login_path,
+                    )
+                )
+                action = "created"
+
+            row = await conn.fetchrow(
+                """
+                SELECT domain, cover_url, login_path, monthly_cost_credits
+                FROM private_links
+                WHERE id = $1
+                """,
+                link_id,
+            )
+
+    if not row:
+        return False, "Private link saved, but I could not load it afterward."
+
+    return True, {
+        "action": action,
+        "domain": str(row["domain"]),
+        "cover_url": str(row["cover_url"]),
+        "login_path": str(row["login_path"]),
+        "monthly_cost_credits": float(row["monthly_cost_credits"] or 0),
+    }
 
 
 async def resolve_user_identifier(conn: asyncpg.Connection, identifier: str) -> asyncpg.Record | None:
@@ -353,11 +547,13 @@ async def list_private_links_for_owner(pool: asyncpg.Pool, owner_discord_user_id
     rows = await pool.fetch(
         """
         SELECT private_links.domain,
+               private_links.cover_url,
+               private_links.login_path,
                COUNT(private_link_members.user_id) AS member_count
         FROM private_links
         LEFT JOIN private_link_members ON private_link_members.link_id = private_links.id
         WHERE private_links.owner_user_id = $1
-        GROUP BY private_links.id, private_links.domain
+        GROUP BY private_links.id, private_links.domain, private_links.cover_url, private_links.login_path
         ORDER BY lower(private_links.domain)
         """,
         owner_user_id,
@@ -365,6 +561,8 @@ async def list_private_links_for_owner(pool: asyncpg.Pool, owner_discord_user_id
     return True, [
         {
             "domain": str(row["domain"]),
+            "cover_url": str(row["cover_url"]),
+            "login_path": str(row["login_path"]),
             "member_count": int(row["member_count"] or 0),
         }
         for row in rows

@@ -12,15 +12,17 @@ from .database import (
     add_private_link_member,
     claim_link_code,
     create_pool,
+    create_route_pool,
     get_credit_balance_for_discord_user,
     list_private_links_for_owner,
     grant_level_up_credit,
     remove_private_link_member,
+    save_private_link_for_owner,
 )
 from .dispense_usage import ensure_dispense_usage_store, reset_guild_dispense, reset_user_dispense
 from .models import SiteEntry
 from .utils import parse_tags, slugify
-from .views import DISPENSER_FILTERS, DISPENSER_SITE_TYPES, SiteDispenserView, build_dispenser_embed, create_private_link
+from .views import SiteDispenserView, build_dispenser_embed
 from .xp import XP_COOLDOWN_SECONDS, apply_message_xp, ensure_xp_store, load_xp_store, save_xp_store, xp_needed_for_level
 
 
@@ -35,6 +37,7 @@ intents = discord.Intents.default()
 intents.message_content = True
 bot = commands.Bot(command_prefix="!", intents=intents)
 bot.db_pool = None
+bot.route_db_pool = None
 bot.xp_cooldowns: dict[str, float] = {}
 
 
@@ -46,30 +49,33 @@ def build_private_link_dm_embed(result: dict[str, object]) -> discord.Embed:
         color=discord.Color.blue(),
     )
     embed.add_field(name="Domain", value="https://" + str(domain), inline=False)
-    embed.add_field(name="Cover URL", value=str(result.get("cover_url") or "Not set"), inline=False)
+    embed.add_field(name="Cover Site", value=str(result.get("cover_url") or "Not set"), inline=False)
     embed.add_field(name="Login Path", value="https://" + str(domain) + str(result.get("login_path") or "Not set"), inline=False)
     embed.add_field(name="Cost", value=f"{float(result.get('monthly_cost_credits') or 0):.2f} credits/month", inline=False)
     return embed
 
 
 def build_private_link_owner_dm_embed(result: dict[str, object]) -> discord.Embed:
-    url = str(result.get("url") or "").strip()
+    domain = str(result.get("domain") or result.get("url") or "").strip()
+    login_path = str(result.get("login_path") or "").strip()
+    cover_url = str(result.get("cover_url") or "").strip()
+    action = str(result.get("action") or "").strip().title() or "Saved"
     embed = discord.Embed(
-        title="Your Private Link",
-        description=f"`{url}`" if url else "A private link was generated for you.",
+        title="Your Private Link Is Ready",
+        description=f"{action} your private link setup.",
         color=discord.Color.green(),
     )
-    if url:
-        embed.add_field(name="URL", value=url, inline=False)
-    source = str(result.get("source") or "").strip()
-    if source:
-        embed.add_field(name="Source", value=source, inline=True)
-    site = str(result.get("site") or "").strip()
-    if site:
-        embed.add_field(name="Site", value=site, inline=True)
-    filter_name = str(result.get("filter_name") or "").strip()
-    if filter_name:
-        embed.add_field(name="Filter", value=filter_name, inline=True)
+    if domain:
+        embed.add_field(name="Private Domain", value=f"https://{domain}", inline=False)
+    if login_path and domain:
+        embed.add_field(name="Login URL", value=f"https://{domain}{login_path}", inline=False)
+    if cover_url:
+        embed.add_field(name="Cover Site", value=cover_url, inline=False)
+    embed.add_field(
+        name="How It Works",
+        value="People see the cover site first. You use the login URL when you want the private CanLite page.",
+        inline=False,
+    )
     return embed
 
 
@@ -137,6 +143,7 @@ async def assign_linked_role(interaction: discord.Interaction) -> tuple[bool, st
 @bot.event
 async def setup_hook() -> None:
     bot.db_pool = await create_pool()
+    bot.route_db_pool = await create_route_pool()
     ensure_xp_store()
     ensure_dispense_usage_store()
     bot.add_view(SiteDispenserView())
@@ -223,7 +230,7 @@ async def dispense_command(interaction: discord.Interaction) -> None:
 
 
 @bot.tree.command(name="private-add", description="Add a CanLite user to one of your private links.")
-@app_commands.describe(domain="The private-link domain you own.", identifier="Email, Discord @name, mention, or Discord ID.")
+@app_commands.describe(domain="The private-link domain you own.", identifier="Their CanLite email, Discord @name, mention, or Discord ID.")
 async def private_add_command(interaction: discord.Interaction, domain: str, identifier: str) -> None:
     await interaction.response.defer(ephemeral=True, thinking=True)
     ok, result = await add_private_link_member(bot.db_pool, interaction.user.id, domain, identifier)
@@ -242,7 +249,7 @@ async def private_add_command(interaction: discord.Interaction, domain: str, ide
 
 
 @bot.tree.command(name="private-remove", description="Remove a CanLite user from one of your private links.")
-@app_commands.describe(domain="The private-link domain you own.", identifier="Email, Discord @name, mention, or Discord ID.")
+@app_commands.describe(domain="The private-link domain you own.", identifier="Their CanLite email, Discord @name, mention, or Discord ID.")
 async def private_remove_command(interaction: discord.Interaction, domain: str, identifier: str) -> None:
     await interaction.response.defer(ephemeral=True, thinking=True)
     ok, message = await remove_private_link_member(bot.db_pool, interaction.user.id, domain, identifier)
@@ -259,74 +266,114 @@ async def private_list_command(interaction: discord.Interaction) -> None:
 
     links = result if isinstance(result, list) else []
     if not links:
-        await interaction.followup.send("No private links were found on your linked CanLite account.", ephemeral=True)
+        await interaction.followup.send(
+            "No private links yet.\n\nStart with `/private-create` and fill in:\n- a brand-new domain\n- a secret login path\n- a normal-looking cover site",
+            ephemeral=True,
+        )
         return
 
-    lines = [f"`{item['domain']}` - {item['member_count']} member(s)" for item in links[:20]]
+    lines = [f"`{item['domain']}` - `{item['login_path']}` - {item['member_count']} invited member(s)" for item in links[:20]]
     embed = discord.Embed(
         title="Your Private Links",
         description="\n".join(lines),
         color=discord.Color.blurple(),
+    )
+    embed.add_field(
+        name="Setup Reminder",
+        value="Use a brand-new domain, choose a secret login path, and pick a normal-looking cover site.",
+        inline=False,
     )
     if len(links) > 20:
         embed.add_field(name="More", value=f"{len(links) - 20} additional link(s) not shown.", inline=False)
     await interaction.followup.send(embed=embed, ephemeral=True)
 
 
-@bot.tree.command(name="private-generate", description="DM a private link using either your own URL or the link generator.")
+@bot.tree.command(name="private-create", description="Create or update one of your real CanLite private links.")
 @app_commands.describe(
-    url="Optional URL to DM directly.",
-    site="Optional site to generate from when no URL is provided.",
-    filter_name="Optional filter to use when generating a URL.",
+    domain="A brand-new domain or subdomain you control, like study.example.com.",
+    login_path="A secret path like /school or /notes that opens your CanLite login page.",
+    cover_url="The normal site people should see before they use your login path.",
 )
-@app_commands.choices(
-    site=[app_commands.Choice(name=site_name, value=site_name) for site_name in DISPENSER_SITE_TYPES],
-    filter_name=[app_commands.Choice(name=filter_value.title(), value=filter_value) for filter_value in DISPENSER_FILTERS],
-)
-async def private_generate_command(
+async def private_create_command(
     interaction: discord.Interaction,
-    url: str | None = None,
-    site: str | None = None,
-    filter_name: str | None = None,
+    domain: str,
+    login_path: str,
+    cover_url: str,
 ) -> None:
     await interaction.response.defer(ephemeral=True, thinking=True)
 
-    provided_url = (url or "").strip()
-    selected_site = (site or "").strip()
-    selected_filter = (filter_name or "").strip().lower()
-    if not provided_url and (not selected_site or not selected_filter):
+    linked_user_id = await bot.db_pool.fetchval(
+        "SELECT user_id FROM discord_account_links WHERE discord_user_id = $1",
+        str(interaction.user.id),
+    )
+    if not linked_user_id:
         await interaction.followup.send(
-            "Provide either `url` or both `site` and `filter_name`.",
+            f"Link your Discord account first from {CANLITE_ACCOUNT_URL}, then run `/private-create` again.",
             ephemeral=True,
         )
         return
 
     try:
-        result = await create_private_link(
-            url=provided_url or None,
-            site=selected_site or None,
-            filter_name=selected_filter or None,
+        ok, result = await save_private_link_for_owner(
+            bot.db_pool,
+            bot.route_db_pool,
+            interaction.user.id,
+            domain=domain,
+            cover_url=cover_url,
+            login_path=login_path,
         )
     except Exception as exc:
-        await interaction.followup.send(f"Could not generate a link right now: {exc}", ephemeral=True)
+        await interaction.followup.send(f"Could not save your private link right now: {exc}", ephemeral=True)
         return
 
-    payload = {
-        "url": str(result.get("url") or "").strip(),
-        "source": "Provided URL" if provided_url else "Link Generator",
-        "site": str(result.get("site") or selected_site).strip(),
-        "filter_name": str(result.get("filter_name") or selected_filter).strip().title(),
-    }
+    if not ok:
+        await interaction.followup.send(str(result), ephemeral=True)
+        return
 
+    payload = result if isinstance(result, dict) else {"action": "saved"}
+
+    saved_domain = str(payload.get("domain") or "").strip()
+    saved_login_path = str(payload.get("login_path") or "").strip()
     dm_note = await try_send_owner_private_link_dm(interaction.user, payload)
-    if dm_note:
-        await interaction.followup.send(dm_note, ephemeral=True)
-        return
-
-    await interaction.followup.send(
-        "Sent your private link by DM.",
-        ephemeral=True,
+    message = (
+        f"Private link saved for `https://{saved_domain}`.\n\n"
+        f"Login URL: `https://{saved_domain}{saved_login_path}`\n"
+        f"Cover site: `{payload.get('cover_url')}`\n\n"
+        "The login URL is the secret one you use to open the private CanLite page.\n"
+        "Anyone who visits the main domain normally will see the cover site instead."
     )
+    if dm_note:
+        message += f"\n\n{dm_note}"
+    else:
+        message += "\n\nI also sent the setup details to your DMs."
+    await interaction.followup.send(message, ephemeral=True)
+
+
+@bot.tree.command(name="private-help", description="Show a simple guide for setting up a real CanLite private link.")
+async def private_help_command(interaction: discord.Interaction) -> None:
+    embed = discord.Embed(title="Private Link Setup", color=discord.Color.blurple())
+    embed.description = "A private link is your own domain that hides CanLite behind a normal-looking cover site."
+    embed.add_field(
+        name="Step 1",
+        value=f"Link your Discord account from {CANLITE_ACCOUNT_URL}.",
+        inline=False,
+    )
+    embed.add_field(
+        name="Step 2",
+        value="Point a brand-new domain or subdomain to `104.36.85.249`.",
+        inline=False,
+    )
+    embed.add_field(
+        name="Step 3",
+        value="Run `/private-create` with your domain, a secret login path, and a cover site.",
+        inline=False,
+    )
+    embed.add_field(
+        name="Example",
+        value="Domain: `study.example.com`\nLogin path: `/notes`\nCover site: `https://google.com`",
+        inline=False,
+    )
+    await interaction.response.send_message(embed=embed, ephemeral=True)
 
 
 @bot.tree.command(name="rank", description="Show your XP, level, and message count.")
