@@ -1,5 +1,6 @@
 import asyncio
 import json
+from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
 from urllib.request import urlopen
 
@@ -26,6 +27,7 @@ DISPENSER_FILTERS = [
 
 GENERATOR_BASE_URL = "http://127.0.0.1:8080/generate"
 GENERATOR_IP = "104.36.85.249"
+GENERATOR_REQUEST_TIMEOUT = 180
 
 def build_dispenser_embed() -> discord.Embed:
     site_count = len(DISPENSER_SITE_TYPES)
@@ -116,8 +118,15 @@ def _generate_link_sync(selected_site: str, selected_filter: str) -> str:
         }
     )
     request_url = f"{GENERATOR_BASE_URL}?{query}"
-    with urlopen(request_url, timeout=60) as response:
-        payload = json.loads(response.read().decode("utf-8"))
+    try:
+        with urlopen(request_url, timeout=GENERATOR_REQUEST_TIMEOUT) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+    except HTTPError as exc:
+        if exc.code == 504:
+            raise ValueError("The generator took too long to finish. Try again in a moment.") from exc
+        raise ValueError(f"Generator request failed with HTTP {exc.code}.") from exc
+    except URLError as exc:
+        raise ValueError("Could not reach the local generator at 127.0.0.1:8080.") from exc
 
     generated_url = str(payload.get("url") or "").strip()
     if not generated_url:
