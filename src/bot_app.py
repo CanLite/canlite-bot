@@ -20,7 +20,7 @@ from .database import (
 from .dispense_usage import ensure_dispense_usage_store, reset_guild_dispense, reset_user_dispense
 from .models import SiteEntry
 from .utils import parse_tags, slugify
-from .views import SiteDispenserView, build_dispenser_embed
+from .views import DISPENSER_FILTERS, DISPENSER_SITE_TYPES, SiteDispenserView, build_dispenser_embed, create_private_link
 from .xp import XP_COOLDOWN_SECONDS, apply_message_xp, ensure_xp_store, load_xp_store, save_xp_store, xp_needed_for_level
 
 
@@ -52,6 +52,27 @@ def build_private_link_dm_embed(result: dict[str, object]) -> discord.Embed:
     return embed
 
 
+def build_private_link_owner_dm_embed(result: dict[str, object]) -> discord.Embed:
+    url = str(result.get("url") or "").strip()
+    embed = discord.Embed(
+        title="Your Private Link",
+        description=f"`{url}`" if url else "A private link was generated for you.",
+        color=discord.Color.green(),
+    )
+    if url:
+        embed.add_field(name="URL", value=url, inline=False)
+    source = str(result.get("source") or "").strip()
+    if source:
+        embed.add_field(name="Source", value=source, inline=True)
+    site = str(result.get("site") or "").strip()
+    if site:
+        embed.add_field(name="Site", value=site, inline=True)
+    filter_name = str(result.get("filter_name") or "").strip()
+    if filter_name:
+        embed.add_field(name="Filter", value=filter_name, inline=True)
+    return embed
+
+
 async def try_send_private_link_dm(result: dict[str, object]) -> str | None:
     target_discord_user_id = result.get("target_discord_user_id")
     if not target_discord_user_id:
@@ -67,6 +88,14 @@ async def try_send_private_link_dm(result: dict[str, object]) -> str | None:
     except discord.HTTPException:
         return "Invite added, but I could not deliver the DM to the linked Discord account."
 
+    return None
+
+
+async def try_send_owner_private_link_dm(user: discord.abc.User, result: dict[str, object]) -> str | None:
+    try:
+        await user.send(embed=build_private_link_owner_dm_embed(result))
+    except discord.HTTPException:
+        return "I could not deliver the private link by DM. Check your DM settings and try again."
     return None
 
 
@@ -242,6 +271,62 @@ async def private_list_command(interaction: discord.Interaction) -> None:
     if len(links) > 20:
         embed.add_field(name="More", value=f"{len(links) - 20} additional link(s) not shown.", inline=False)
     await interaction.followup.send(embed=embed, ephemeral=True)
+
+
+@bot.tree.command(name="private-generate", description="DM a private link using either your own URL or the link generator.")
+@app_commands.describe(
+    url="Optional URL to DM directly.",
+    site="Optional site to generate from when no URL is provided.",
+    filter_name="Optional filter to use when generating a URL.",
+)
+@app_commands.choices(
+    site=[app_commands.Choice(name=site_name, value=site_name) for site_name in DISPENSER_SITE_TYPES],
+    filter_name=[app_commands.Choice(name=filter_value.title(), value=filter_value) for filter_value in DISPENSER_FILTERS],
+)
+async def private_generate_command(
+    interaction: discord.Interaction,
+    url: str | None = None,
+    site: str | None = None,
+    filter_name: str | None = None,
+) -> None:
+    await interaction.response.defer(ephemeral=True, thinking=True)
+
+    provided_url = (url or "").strip()
+    selected_site = (site or "").strip()
+    selected_filter = (filter_name or "").strip().lower()
+    if not provided_url and (not selected_site or not selected_filter):
+        await interaction.followup.send(
+            "Provide either `url` or both `site` and `filter_name`.",
+            ephemeral=True,
+        )
+        return
+
+    try:
+        result = await create_private_link(
+            url=provided_url or None,
+            site=selected_site or None,
+            filter_name=selected_filter or None,
+        )
+    except Exception as exc:
+        await interaction.followup.send(f"Could not generate a link right now: {exc}", ephemeral=True)
+        return
+
+    payload = {
+        "url": str(result.get("url") or "").strip(),
+        "source": "Provided URL" if provided_url else "Link Generator",
+        "site": str(result.get("site") or selected_site).strip(),
+        "filter_name": str(result.get("filter_name") or selected_filter).strip().title(),
+    }
+
+    dm_note = await try_send_owner_private_link_dm(interaction.user, payload)
+    if dm_note:
+        await interaction.followup.send(dm_note, ephemeral=True)
+        return
+
+    await interaction.followup.send(
+        "Sent your private link by DM.",
+        ephemeral=True,
+    )
 
 
 @bot.tree.command(name="rank", description="Show your XP, level, and message count.")

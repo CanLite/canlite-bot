@@ -27,7 +27,6 @@ DISPENSER_FILTERS = [
 GENERATOR_BASE_URL = "http://127.0.0.1:8080/generate"
 GENERATOR_IP = "104.36.85.249"
 
-
 def build_dispenser_embed() -> discord.Embed:
     site_count = len(DISPENSER_SITE_TYPES)
 
@@ -70,13 +69,25 @@ def build_generation_pending_embed(selected_site: str, selected_filter: str, rem
 
 def build_generation_result_embed(selected_site: str, selected_filter: str, generated_url: str, remaining_uses: int) -> discord.Embed:
     embed = discord.Embed(
-        title="Your Link",
-        description=generated_url,
+        title="Link Sent",
+        description="Your generated URL was delivered by DM.",
         color=discord.Color.green(),
     )
     embed.add_field(name="Site", value=selected_site, inline=True)
     embed.add_field(name="Filter", value=titleize(selected_filter), inline=True)
     embed.add_field(name="Remaining", value=f"{remaining_uses}/{DISPENSE_LIMIT}", inline=True)
+    return embed
+
+
+def build_generation_dm_embed(selected_site: str, selected_filter: str, generated_url: str, remaining_uses: int) -> discord.Embed:
+    embed = discord.Embed(
+        title="Your Generated URL",
+        description=generated_url,
+        color=discord.Color.green(),
+    )
+    embed.add_field(name="Site", value=selected_site, inline=True)
+    embed.add_field(name="Filter", value=titleize(selected_filter), inline=True)
+    embed.add_field(name="Remaining After This", value=f"{remaining_uses}/{DISPENSE_LIMIT}", inline=True)
     return embed
 
 
@@ -114,8 +125,37 @@ def _generate_link_sync(selected_site: str, selected_filter: str) -> str:
     return generated_url
 
 
+def create_private_link_payload(url: str | None = None, site: str | None = None, filter_name: str | None = None) -> dict[str, str]:
+    provided_url = (url or "").strip()
+    if provided_url:
+        return {
+            "url": provided_url,
+            "source": "provided_url",
+            "site": "",
+            "filter_name": "",
+        }
+
+    selected_site = (site or "").strip()
+    selected_filter = (filter_name or "").strip().lower()
+    if not selected_site or not selected_filter:
+        raise ValueError("Provide either a URL or both site and filter_name.")
+
+    generated_url = _generate_link_sync(selected_site, selected_filter)
+
+    return {
+        "url": generated_url,
+        "source": "generator",
+        "site": selected_site,
+        "filter_name": selected_filter,
+    }
+
+
 async def generate_link(selected_site: str, selected_filter: str) -> str:
     return await asyncio.to_thread(_generate_link_sync, selected_site, selected_filter)
+
+
+async def create_private_link(url: str | None = None, site: str | None = None, filter_name: str | None = None) -> dict[str, str]:
+    return await asyncio.to_thread(create_private_link_payload, url, site, filter_name)
 
 
 async def send_dispense_log(
@@ -240,6 +280,21 @@ class GenerateButton(discord.ui.Button):
                     selected_filter,
                     remaining_before,
                     f"Could not generate a link right now: {exc}",
+                )
+            )
+            return
+
+        try:
+            await interaction.user.send(
+                embed=build_generation_dm_embed(view.selected_site, selected_filter, generated_url, remaining_before - 1)
+            )
+        except discord.HTTPException:
+            await interaction.edit_original_response(
+                embed=build_generation_error_embed(
+                    view.selected_site,
+                    selected_filter,
+                    remaining_before,
+                    "I generated the URL, but could not DM it to you. Check your DM settings and try again.",
                 )
             )
             return
