@@ -44,33 +44,33 @@ bot.xp_cooldowns: dict[str, float] = {}
 
 def build_private_create_intro_embed() -> discord.Embed:
     embed = discord.Embed(title="Create A Private Link", color=discord.Color.blurple())
-    embed.description = "Choose how you want the cover link to work."
+    embed.description = "The cover site is always user-provided. Choose how the private-link URL itself should be created."
     embed.add_field(
-        name="Use Specific Link",
-        value="Paste a cover link you already want to use.",
+        name="Use Specific Private-Link URL",
+        value="Paste the actual private-link URL people should visit.",
         inline=False,
     )
     embed.add_field(
-        name="Generate Link For Me",
-        value="Pick a cover site and filter, then CanLite will generate the cover link from `127.0.0.1:8080`.",
+        name="Generate Private-Link URL",
+        value="Pick a filter, then CanLite will generate the actual private-link URL for you.",
         inline=False,
     )
     embed.add_field(
         name="Before You Start",
-        value="A brand-new domain, a secret login path, and a linked CanLite account.",
+        value="A cover site URL, a secret login path, and a linked CanLite account.",
         inline=False,
     )
     return embed
 
 
-def build_private_create_generated_embed(selected_site: str | None = None, selected_filter: str | None = None) -> discord.Embed:
-    embed = discord.Embed(title="Generate The Cover Link", color=discord.Color.blurple())
-    embed.description = "Pick the cover site and filter first. After that, I will ask for your domain and secret login path."
-    embed.add_field(name="Cover Site", value=selected_site or "Not chosen yet", inline=True)
+def build_private_create_generated_embed(selected_filter: str | None = None) -> discord.Embed:
+    embed = discord.Embed(title="Generate The Private-Link URL", color=discord.Color.blurple())
+    embed.description = "Pick the filter first. After that, I will ask for your cover site and secret login path."
+    embed.add_field(name="Type", value="CanLite", inline=True)
     embed.add_field(name="Filter", value=selected_filter.title() if selected_filter else "Not chosen yet", inline=True)
     embed.add_field(
         name="Next Step",
-        value="Choose both fields, then click `Continue`.",
+        value="Choose the filter, then click `Continue`.",
         inline=False,
     )
     return embed
@@ -83,8 +83,8 @@ def build_private_link_dm_embed(result: dict[str, object]) -> discord.Embed:
         description=f"You were added to `{domain}`.",
         color=discord.Color.blue(),
     )
-    embed.add_field(name="Domain", value="https://" + str(domain), inline=False)
-    embed.add_field(name="Cover Link", value=str(result.get("cover_url") or "Not set"), inline=False)
+    embed.add_field(name="Private-Link URL", value="https://" + str(domain), inline=False)
+    embed.add_field(name="Cover Site", value=str(result.get("cover_url") or "Not set"), inline=False)
     embed.add_field(name="Login Path", value="https://" + str(domain) + str(result.get("login_path") or "Not set"), inline=False)
     embed.add_field(name="Cost", value=f"{float(result.get('monthly_cost_credits') or 0):.2f} credits/month", inline=False)
     return embed
@@ -101,14 +101,14 @@ def build_private_link_owner_dm_embed(result: dict[str, object]) -> discord.Embe
         color=discord.Color.green(),
     )
     if domain:
-        embed.add_field(name="Private Domain", value=f"https://{domain}", inline=False)
+        embed.add_field(name="Private-Link URL", value=f"https://{domain}", inline=False)
     if login_path and domain:
         embed.add_field(name="Login URL", value=f"https://{domain}{login_path}", inline=False)
     if cover_url:
-        embed.add_field(name="Cover Link", value=cover_url, inline=False)
+        embed.add_field(name="Cover Site", value=cover_url, inline=False)
     embed.add_field(
         name="How It Works",
-        value="People see the cover link first. You use the login URL when you want the private CanLite page.",
+        value="People see the cover site first. You use the login URL when you want the private CanLite page.",
         inline=False,
     )
     return embed
@@ -140,17 +140,17 @@ async def try_send_owner_private_link_dm(user: discord.abc.User, result: dict[st
     return None
 
 
-async def send_private_create_success(interaction: discord.Interaction, payload: dict[str, object], cover_source: str) -> None:
+async def send_private_create_success(interaction: discord.Interaction, payload: dict[str, object], private_link_source: str) -> None:
     saved_domain = str(payload.get("domain") or "").strip()
     saved_login_path = str(payload.get("login_path") or "").strip()
     dm_note = await try_send_owner_private_link_dm(interaction.user, payload)
     message = (
         f"Private link saved for `https://{saved_domain}`.\n\n"
         f"Login URL: `https://{saved_domain}{saved_login_path}`\n"
-        f"Cover link: `{payload.get('cover_url')}`\n"
-        f"Cover link source: `{cover_source}`\n\n"
+        f"Cover site: `{payload.get('cover_url')}`\n"
+        f"Private-link URL source: `{private_link_source}`\n\n"
         "Use the login URL when you want the private CanLite page.\n"
-        "Anyone who opens the main domain normally will see the cover link instead."
+        "Anyone who opens the main domain normally will see the cover site instead."
     )
     if dm_note:
         message += f"\n\n{dm_note}"
@@ -160,10 +160,10 @@ async def send_private_create_success(interaction: discord.Interaction, payload:
 
 
 class PrivateCreateSpecificModal(discord.ui.Modal, title="Private Link Setup"):
-    domain = discord.ui.TextInput(
-        label="Private domain",
-        placeholder="study.example.com",
-        max_length=120,
+    private_link_url = discord.ui.TextInput(
+        label="Private-link URL",
+        placeholder="https://study.example.com",
+        max_length=300,
     )
     login_path = discord.ui.TextInput(
         label="Secret login path",
@@ -171,7 +171,7 @@ class PrivateCreateSpecificModal(discord.ui.Modal, title="Private Link Setup"):
         max_length=120,
     )
     cover_url = discord.ui.TextInput(
-        label="Specific cover link",
+        label="Cover site URL",
         placeholder="https://google.com",
         max_length=300,
     )
@@ -187,9 +187,10 @@ class PrivateCreateSpecificModal(discord.ui.Modal, title="Private Link Setup"):
                 bot.db_pool,
                 bot.route_db_pool,
                 interaction.user.id,
-                domain=str(self.domain),
+                private_link_url=str(self.private_link_url),
                 cover_url=str(self.cover_url),
                 login_path=str(self.login_path),
+                link_source="byo",
             )
         except Exception as exc:
             await interaction.followup.send(f"Could not save your private link right now: {exc}", ephemeral=True)
@@ -200,48 +201,47 @@ class PrivateCreateSpecificModal(discord.ui.Modal, title="Private Link Setup"):
             return
 
         payload = result if isinstance(result, dict) else {"action": "saved"}
-        await send_private_create_success(interaction, payload, "specific link")
+        await send_private_create_success(interaction, payload, "user-provided")
 
 
 class PrivateCreateGeneratedModal(discord.ui.Modal, title="Private Link Setup"):
-    domain = discord.ui.TextInput(
-        label="Private domain",
-        placeholder="study.example.com",
-        max_length=120,
-    )
     login_path = discord.ui.TextInput(
         label="Secret login path",
         placeholder="/notes",
         max_length=120,
     )
+    cover_url = discord.ui.TextInput(
+        label="Cover site URL",
+        placeholder="https://google.com",
+        max_length=300,
+    )
 
-    def __init__(self, selected_site: str, selected_filter: str) -> None:
+    def __init__(self, selected_filter: str) -> None:
         super().__init__()
-        self.selected_site = selected_site
         self.selected_filter = selected_filter
 
     async def on_submit(self, interaction: discord.Interaction) -> None:
         await interaction.response.defer(ephemeral=True, thinking=True)
 
         try:
-            cover_result = await create_private_link(
-                site=self.selected_site,
+            private_link_result = await create_private_link(
                 filter_name=self.selected_filter,
             )
         except Exception as exc:
-            await interaction.followup.send(f"Could not build the cover link right now: {exc}", ephemeral=True)
+            await interaction.followup.send(f"Could not build the private-link URL right now: {exc}", ephemeral=True)
             return
 
-        resolved_cover_url = str(cover_result.get("url") or "").strip()
+        resolved_private_link_url = str(private_link_result.get("url") or "").strip()
 
         try:
             ok, result = await save_private_link_for_owner(
                 bot.db_pool,
                 bot.route_db_pool,
                 interaction.user.id,
-                domain=str(self.domain),
-                cover_url=resolved_cover_url,
+                private_link_url=resolved_private_link_url,
+                cover_url=str(self.cover_url),
                 login_path=str(self.login_path),
+                link_source="provided",
             )
         except Exception as exc:
             await interaction.followup.send(f"Could not save your private link right now: {exc}", ephemeral=True)
@@ -255,7 +255,7 @@ class PrivateCreateGeneratedModal(discord.ui.Modal, title="Private Link Setup"):
         await send_private_create_success(
             interaction,
             payload,
-            f"generated {self.selected_site} / {self.selected_filter}",
+            f"generated CanLite / {self.selected_filter}",
         )
 
 
@@ -263,7 +263,6 @@ class PrivateCreateGeneratedView(discord.ui.View):
     def __init__(self, owner_id: int) -> None:
         super().__init__(timeout=300)
         self.owner_id = owner_id
-        self.selected_site = ""
         self.selected_filter = ""
         self._refresh()
 
@@ -275,34 +274,8 @@ class PrivateCreateGeneratedView(discord.ui.View):
 
     def _refresh(self) -> None:
         self.clear_items()
-        self.add_item(PrivateCreateSiteSelect(self))
         self.add_item(PrivateCreateFilterSelect(self))
         self.add_item(PrivateCreateContinueButton(self))
-
-
-class PrivateCreateSiteSelect(discord.ui.Select):
-    def __init__(self, parent: PrivateCreateGeneratedView) -> None:
-        options = [
-            discord.SelectOption(
-                label=site_name[:100],
-                value=site_name,
-                default=site_name == parent.selected_site,
-            )
-            for site_name in DISPENSER_SITE_TYPES
-        ]
-        super().__init__(placeholder="Choose a site", options=options, row=0)
-        self.parent_view = parent
-
-    async def callback(self, interaction: discord.Interaction) -> None:
-        self.parent_view.selected_site = self.values[0]
-        self.parent_view._refresh()
-        await interaction.response.edit_message(
-            embed=build_private_create_generated_embed(
-                self.parent_view.selected_site,
-                self.parent_view.selected_filter,
-            ),
-            view=self.parent_view,
-        )
 
 
 class PrivateCreateFilterSelect(discord.ui.Select):
@@ -315,17 +288,14 @@ class PrivateCreateFilterSelect(discord.ui.Select):
             )
             for filter_name in DISPENSER_FILTERS
         ]
-        super().__init__(placeholder="Choose a filter", options=options, row=1)
+        super().__init__(placeholder="Choose a filter", options=options, row=0)
         self.parent_view = parent
 
     async def callback(self, interaction: discord.Interaction) -> None:
         self.parent_view.selected_filter = self.values[0]
         self.parent_view._refresh()
         await interaction.response.edit_message(
-            embed=build_private_create_generated_embed(
-                self.parent_view.selected_site,
-                self.parent_view.selected_filter,
-            ),
+            embed=build_private_create_generated_embed(self.parent_view.selected_filter),
             view=self.parent_view,
         )
 
@@ -335,17 +305,14 @@ class PrivateCreateContinueButton(discord.ui.Button):
         super().__init__(
             label="Continue",
             style=discord.ButtonStyle.success,
-            disabled=not (parent.selected_site and parent.selected_filter),
-            row=2,
+            disabled=not parent.selected_filter,
+            row=1,
         )
         self.parent_view = parent
 
     async def callback(self, interaction: discord.Interaction) -> None:
         await interaction.response.send_modal(
-            PrivateCreateGeneratedModal(
-                self.parent_view.selected_site,
-                self.parent_view.selected_filter,
-            )
+            PrivateCreateGeneratedModal(self.parent_view.selected_filter)
         )
 
 
@@ -360,11 +327,11 @@ class PrivateCreateStartView(discord.ui.View):
             return False
         return True
 
-    @discord.ui.button(label="Use Specific Link", style=discord.ButtonStyle.primary, row=0)
+    @discord.ui.button(label="Use Specific URL", style=discord.ButtonStyle.primary, row=0)
     async def use_specific_link(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
         await interaction.response.send_modal(PrivateCreateSpecificModal())
 
-    @discord.ui.button(label="Generate Link For Me", style=discord.ButtonStyle.success, row=0)
+    @discord.ui.button(label="Generate URL For Me", style=discord.ButtonStyle.success, row=0)
     async def generate_link(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
         await interaction.response.edit_message(
             embed=build_private_create_generated_embed(),
@@ -374,7 +341,7 @@ class PrivateCreateStartView(discord.ui.View):
     @discord.ui.button(label="Show Help", style=discord.ButtonStyle.secondary, row=1)
     async def show_help(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
         await interaction.response.send_message(
-            "A private link needs 3 things:\n- a brand-new domain\n- a secret login path\n- a cover link\n\nYou can either paste a cover link yourself or let me generate one from `127.0.0.1:8080`.",
+            "A private link needs 3 things:\n- the actual private-link URL people visit\n- a secret login path\n- a cover site URL\n\nThe cover site is always user-provided. Only the actual private-link URL is pasted or generated.",
             ephemeral=True,
         )
 
@@ -541,7 +508,7 @@ async def private_list_command(interaction: discord.Interaction) -> None:
     links = result if isinstance(result, list) else []
     if not links:
         await interaction.followup.send(
-            "No private links yet.\n\nStart with `/private-create`, then choose:\n- a brand-new domain\n- a secret login path\n- either a specific cover link or a generated one",
+            "No private links yet.\n\nStart with `/private-create`, then choose:\n- the actual private-link URL people visit\n- a secret login path\n- a user-provided cover site URL",
             ephemeral=True,
         )
         return
@@ -554,7 +521,7 @@ async def private_list_command(interaction: discord.Interaction) -> None:
     )
     embed.add_field(
         name="Setup Reminder",
-        value="Use a brand-new domain, choose a secret login path, and then choose either a specific cover link or a generated one.",
+        value="Set the private-link URL, choose a secret login path, and always provide the cover site URL separately.",
         inline=False,
     )
     if len(links) > 20:
@@ -582,10 +549,10 @@ async def private_create_command(interaction: discord.Interaction) -> None:
 @bot.tree.command(name="private-help", description="Explain what a private link is and how to set one up.")
 async def private_help_command(interaction: discord.Interaction) -> None:
     embed = discord.Embed(title="Private Link Help", color=discord.Color.blurple())
-    embed.description = "A private link uses your own domain. Regular visitors see a normal cover link. You use a secret login URL to open the private CanLite page."
+    embed.description = "A private link has two separate URLs: the private-link URL people visit, and the cover site URL shown before login."
     embed.add_field(
         name="Before You Start",
-        value="You need a linked CanLite account and a brand-new domain or subdomain.",
+        value="You need a linked CanLite account, a secret login path, and a cover site URL.",
         inline=False,
     )
     embed.add_field(
@@ -595,22 +562,22 @@ async def private_help_command(interaction: discord.Interaction) -> None:
     )
     embed.add_field(
         name="Step 2",
-        value="Point a brand-new domain or subdomain to `104.36.85.249`.",
+        value="Decide whether the actual private-link URL should be pasted manually or generated from the local CanLite API.",
         inline=False,
     )
     embed.add_field(
         name="Step 3",
-        value="Run `/private-create`, then choose whether you want to paste a cover link or generate one.",
+        value="Run `/private-create`, then provide the cover site URL separately from the private-link URL.",
         inline=False,
     )
     embed.add_field(
-        name="Cover Link Options",
-        value="Option 1: paste a specific cover link\nOption 2: choose a site and filter to generate one from `127.0.0.1:8080`",
+        name="Private-Link URL Options",
+        value="Option 1: paste a specific private-link URL\nOption 2: choose a filter to generate one using CanLite",
         inline=False,
     )
     embed.add_field(
         name="Example",
-        value="Domain: `study.example.com`\nLogin path: `/notes`\nCover link: `https://google.com`",
+        value="Private-link URL: `https://study.example.com`\nLogin path: `/notes`\nCover site: `https://google.com`",
         inline=False,
     )
     await interaction.response.send_message(embed=embed, ephemeral=True)

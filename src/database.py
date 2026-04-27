@@ -1,5 +1,6 @@
 import json
 import re
+from urllib.parse import urlparse
 
 import asyncpg
 import discord
@@ -61,6 +62,22 @@ def normalize_private_link_domain(value: str) -> str:
     return str(value or "").strip().lower()
 
 
+def get_private_link_domain_from_url(value: str) -> str:
+    try:
+        parsed = urlparse(str(value or "").strip())
+    except Exception:
+        return ""
+    return str(parsed.hostname or "").strip().lower()
+
+
+def is_supported_private_link_url(value: str) -> bool:
+    try:
+        parsed = urlparse(str(value or "").strip())
+    except Exception:
+        return False
+    return (not parsed.path or parsed.path == "/") and not parsed.query and not parsed.fragment
+
+
 def normalize_private_link_path(value: str) -> str:
     raw = str(value or "").strip()
     if not raw:
@@ -79,8 +96,6 @@ def is_valid_private_link_path(value: str) -> bool:
 
 def is_valid_http_url(value: str) -> bool:
     try:
-        from urllib.parse import urlparse
-
         parsed = urlparse(str(value or "").strip())
         return parsed.scheme in {"http", "https"} and bool(parsed.netloc)
     except Exception:
@@ -255,26 +270,34 @@ async def save_private_link_for_owner(
     pool: asyncpg.Pool,
     route_pool: asyncpg.Pool,
     owner_discord_user_id: int,
-    domain: str,
+    private_link_url: str,
     cover_url: str,
     login_path: str,
+    link_source: str = "byo",
 ) -> tuple[bool, dict | str]:
     owner_user_id = await get_linked_canlite_user_id(pool, owner_discord_user_id)
     if owner_user_id is None:
         return False, f"Link your Discord account first from {CANLITE_ACCOUNT_URL}."
 
-    normalized_domain = normalize_private_link_domain(domain)
+    normalized_private_link_url = str(private_link_url or "").strip()
+    normalized_domain = get_private_link_domain_from_url(normalized_private_link_url)
     normalized_cover_url = str(cover_url or "").strip()
     normalized_login_path = normalize_private_link_path(login_path)
 
+    if not is_valid_http_url(normalized_private_link_url):
+        return False, "Enter a real private-link URL starting with `http://` or `https://`."
+
+    if not is_supported_private_link_url(normalized_private_link_url):
+        return False, "Private-link URLs cannot include a path, query, or hash."
+
     if not is_valid_private_link_domain(normalized_domain):
-        return False, "Enter a real domain like `study.example.com`."
+        return False, "Enter a real private-link URL like `https://study.example.com`."
 
     if not can_use_private_link_domain(normalized_domain):
-        return False, "That domain cannot be used as a private link."
+        return False, "That private-link URL cannot be used."
 
     if not is_valid_http_url(normalized_cover_url):
-        return False, "Enter a real cover link starting with `http://` or `https://`."
+        return False, "Enter a real cover site URL starting with `http://` or `https://`."
 
     if not is_valid_private_link_path(normalized_login_path):
         return False, "Your login path must start with `/` and only use letters, numbers, `-`, `_`, or `/`."
@@ -325,11 +348,13 @@ async def save_private_link_for_owner(
                     UPDATE private_links
                     SET cover_url = $1,
                         login_path = $2,
+                        link_source = $3,
                         updated_at = NOW()
-                    WHERE id = $3
+                    WHERE id = $4
                     """,
                     normalized_cover_url,
                     normalized_login_path,
+                    link_source,
                     existing_owned_link["id"],
                 )
                 link_id = int(existing_owned_link["id"])
@@ -351,13 +376,14 @@ async def save_private_link_for_owner(
                             slush_pool_credits,
                             provider_enabled
                         )
-                        VALUES ($1, $2, $3, $4, 'byo', 0, 0, true)
+                        VALUES ($1, $2, $3, $4, $5, 0, 0, true)
                         RETURNING id
                         """,
                         owner_user_id,
                         normalized_domain,
                         normalized_cover_url,
                         normalized_login_path,
+                        link_source,
                     )
                 )
                 action = "created"

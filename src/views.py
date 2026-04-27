@@ -126,7 +126,7 @@ def _generate_link_sync(selected_site: str, selected_filter: str) -> str:
             raise ValueError("The generator took too long to finish. Try again in a moment.") from exc
         raise ValueError(f"Generator request failed with HTTP {exc.code}.") from exc
     except URLError as exc:
-        raise ValueError("Could not reach the local generator at 127.0.0.1:8080.") from exc
+        raise ValueError("Could not reach the local generator") from exc
 
     generated_url = str(payload.get("url") or "").strip()
     if not generated_url:
@@ -140,14 +140,14 @@ def create_private_link_payload(url: str | None = None, site: str | None = None,
         return {
             "url": provided_url,
             "source": "provided_url",
-            "site": "",
+            "site": "CanLite",
             "filter_name": "",
         }
 
-    selected_site = (site or "").strip()
+    selected_site = "CanLite"
     selected_filter = (filter_name or "").strip().lower()
-    if not selected_site or not selected_filter:
-        raise ValueError("Provide either a specific link or both a site and filter.")
+    if not selected_filter:
+        raise ValueError("Provide either a specific private-link URL or choose a filter.")
 
     generated_url = _generate_link_sync(selected_site, selected_filter)
 
