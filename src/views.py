@@ -32,7 +32,7 @@ def build_dispenser_embed() -> discord.Embed:
 
     embed = discord.Embed(
         title="CanLite Link Dispenser",
-        description="Choose a site below.",
+        description="Choose a site first, then choose a filter. Your link will be sent by DM.",
         color=discord.Color.from_rgb(116, 217, 182),
     )
     embed.add_field(name="Catalog", value=f"{site_count} sites available", inline=True)
@@ -45,7 +45,7 @@ def build_private_dispenser_embed(selected_site: str, selected_filter: str | Non
 
     embed = discord.Embed(
         title="CanLite Link Dispenser",
-        description="Choose a filter",
+        description="Choose a filter for this site.",
         color=discord.Color.from_rgb(116, 217, 182),
     )
     embed.add_field(name="Site", value=selected_site, inline=True)
@@ -70,7 +70,7 @@ def build_generation_pending_embed(selected_site: str, selected_filter: str, rem
 def build_generation_result_embed(selected_site: str, selected_filter: str, generated_url: str, remaining_uses: int) -> discord.Embed:
     embed = discord.Embed(
         title="Link Sent",
-        description="Your generated URL was delivered by DM.",
+        description="Your generated link was delivered by DM.",
         color=discord.Color.green(),
     )
     embed.add_field(name="Site", value=selected_site, inline=True)
@@ -81,7 +81,7 @@ def build_generation_result_embed(selected_site: str, selected_filter: str, gene
 
 def build_generation_dm_embed(selected_site: str, selected_filter: str, generated_url: str, remaining_uses: int) -> discord.Embed:
     embed = discord.Embed(
-        title="Your Generated URL",
+        title="Your Generated Link",
         description=generated_url,
         color=discord.Color.green(),
     )
@@ -138,7 +138,7 @@ def create_private_link_payload(url: str | None = None, site: str | None = None,
     selected_site = (site or "").strip()
     selected_filter = (filter_name or "").strip().lower()
     if not selected_site or not selected_filter:
-        raise ValueError("Provide either a URL or both site and filter_name.")
+        raise ValueError("Provide either a specific link or both a site and filter.")
 
     generated_url = _generate_link_sync(selected_site, selected_filter)
 
@@ -247,7 +247,7 @@ class FilterSelect(discord.ui.Select):
 class GenerateButton(discord.ui.Button):
     def __init__(self, enabled: bool) -> None:
         super().__init__(
-            label="Generate URL",
+            label="Generate Link",
             style=discord.ButtonStyle.success,
             disabled=not enabled,
             row=1,
@@ -261,7 +261,7 @@ class GenerateButton(discord.ui.Button):
         remaining_before = get_remaining_count(interaction.guild_id, interaction.user.id)
         if remaining_before <= 0:
             await interaction.response.send_message(
-                "You have used all 3 dispenser links. Ask a moderator to reset your limit.",
+                "You have used all of your dispenser links. Ask a moderator to reset your limit.",
                 ephemeral=True,
             )
             return
@@ -294,7 +294,7 @@ class GenerateButton(discord.ui.Button):
                     view.selected_site,
                     selected_filter,
                     remaining_before,
-                    "I generated the URL, but could not DM it to you. Check your DM settings and try again.",
+                    "I generated the link, but could not DM it to you. Check your DM settings and try again.",
                 )
             )
             return

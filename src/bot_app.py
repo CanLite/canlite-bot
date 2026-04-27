@@ -13,6 +13,7 @@ from .database import (
     claim_link_code,
     create_pool,
     create_route_pool,
+    get_linked_canlite_user_id,
     get_credit_balance_for_discord_user,
     list_private_links_for_owner,
     grant_level_up_credit,
@@ -39,6 +40,40 @@ bot = commands.Bot(command_prefix="!", intents=intents)
 bot.db_pool = None
 bot.route_db_pool = None
 bot.xp_cooldowns: dict[str, float] = {}
+
+
+def build_private_create_intro_embed() -> discord.Embed:
+    embed = discord.Embed(title="Create A Private Link", color=discord.Color.blurple())
+    embed.description = "Choose how you want the cover link to work."
+    embed.add_field(
+        name="Use Specific Link",
+        value="Paste a cover link you already want to use.",
+        inline=False,
+    )
+    embed.add_field(
+        name="Generate Link For Me",
+        value="Pick a cover site and filter, then CanLite will generate the cover link from `127.0.0.1:8080`.",
+        inline=False,
+    )
+    embed.add_field(
+        name="Before You Start",
+        value="A brand-new domain, a secret login path, and a linked CanLite account.",
+        inline=False,
+    )
+    return embed
+
+
+def build_private_create_generated_embed(selected_site: str | None = None, selected_filter: str | None = None) -> discord.Embed:
+    embed = discord.Embed(title="Generate The Cover Link", color=discord.Color.blurple())
+    embed.description = "Pick the cover site and filter first. After that, I will ask for your domain and secret login path."
+    embed.add_field(name="Cover Site", value=selected_site or "Not chosen yet", inline=True)
+    embed.add_field(name="Filter", value=selected_filter.title() if selected_filter else "Not chosen yet", inline=True)
+    embed.add_field(
+        name="Next Step",
+        value="Choose both fields, then click `Continue`.",
+        inline=False,
+    )
+    return embed
 
 
 def build_private_link_dm_embed(result: dict[str, object]) -> discord.Embed:
@@ -103,6 +138,245 @@ async def try_send_owner_private_link_dm(user: discord.abc.User, result: dict[st
     except discord.HTTPException:
         return "I could not deliver the private link by DM. Check your DM settings and try again."
     return None
+
+
+async def send_private_create_success(interaction: discord.Interaction, payload: dict[str, object], cover_source: str) -> None:
+    saved_domain = str(payload.get("domain") or "").strip()
+    saved_login_path = str(payload.get("login_path") or "").strip()
+    dm_note = await try_send_owner_private_link_dm(interaction.user, payload)
+    message = (
+        f"Private link saved for `https://{saved_domain}`.\n\n"
+        f"Login URL: `https://{saved_domain}{saved_login_path}`\n"
+        f"Cover link: `{payload.get('cover_url')}`\n"
+        f"Cover link source: `{cover_source}`\n\n"
+        "Use the login URL when you want the private CanLite page.\n"
+        "Anyone who opens the main domain normally will see the cover link instead."
+    )
+    if dm_note:
+        message += f"\n\n{dm_note}"
+    else:
+        message += "\n\nI also sent the setup details to your DMs."
+    await interaction.followup.send(message, ephemeral=True)
+
+
+class PrivateCreateSpecificModal(discord.ui.Modal, title="Private Link Setup"):
+    domain = discord.ui.TextInput(
+        label="Private domain",
+        placeholder="study.example.com",
+        max_length=120,
+    )
+    login_path = discord.ui.TextInput(
+        label="Secret login path",
+        placeholder="/notes",
+        max_length=120,
+    )
+    cover_url = discord.ui.TextInput(
+        label="Specific cover link",
+        placeholder="https://google.com",
+        max_length=300,
+    )
+
+    def __init__(self) -> None:
+        super().__init__()
+
+    async def on_submit(self, interaction: discord.Interaction) -> None:
+        await interaction.response.defer(ephemeral=True, thinking=True)
+
+        try:
+            ok, result = await save_private_link_for_owner(
+                bot.db_pool,
+                bot.route_db_pool,
+                interaction.user.id,
+                domain=str(self.domain),
+                cover_url=str(self.cover_url),
+                login_path=str(self.login_path),
+            )
+        except Exception as exc:
+            await interaction.followup.send(f"Could not save your private link right now: {exc}", ephemeral=True)
+            return
+
+        if not ok:
+            await interaction.followup.send(str(result), ephemeral=True)
+            return
+
+        payload = result if isinstance(result, dict) else {"action": "saved"}
+        await send_private_create_success(interaction, payload, "specific link")
+
+
+class PrivateCreateGeneratedModal(discord.ui.Modal, title="Private Link Setup"):
+    domain = discord.ui.TextInput(
+        label="Private domain",
+        placeholder="study.example.com",
+        max_length=120,
+    )
+    login_path = discord.ui.TextInput(
+        label="Secret login path",
+        placeholder="/notes",
+        max_length=120,
+    )
+
+    def __init__(self, selected_site: str, selected_filter: str) -> None:
+        super().__init__()
+        self.selected_site = selected_site
+        self.selected_filter = selected_filter
+
+    async def on_submit(self, interaction: discord.Interaction) -> None:
+        await interaction.response.defer(ephemeral=True, thinking=True)
+
+        try:
+            cover_result = await create_private_link(
+                site=self.selected_site,
+                filter_name=self.selected_filter,
+            )
+        except Exception as exc:
+            await interaction.followup.send(f"Could not build the cover link right now: {exc}", ephemeral=True)
+            return
+
+        resolved_cover_url = str(cover_result.get("url") or "").strip()
+
+        try:
+            ok, result = await save_private_link_for_owner(
+                bot.db_pool,
+                bot.route_db_pool,
+                interaction.user.id,
+                domain=str(self.domain),
+                cover_url=resolved_cover_url,
+                login_path=str(self.login_path),
+            )
+        except Exception as exc:
+            await interaction.followup.send(f"Could not save your private link right now: {exc}", ephemeral=True)
+            return
+
+        if not ok:
+            await interaction.followup.send(str(result), ephemeral=True)
+            return
+
+        payload = result if isinstance(result, dict) else {"action": "saved"}
+        await send_private_create_success(
+            interaction,
+            payload,
+            f"generated {self.selected_site} / {self.selected_filter}",
+        )
+
+
+class PrivateCreateGeneratedView(discord.ui.View):
+    def __init__(self, owner_id: int) -> None:
+        super().__init__(timeout=300)
+        self.owner_id = owner_id
+        self.selected_site = ""
+        self.selected_filter = ""
+        self._refresh()
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.owner_id:
+            await interaction.response.send_message("This setup panel belongs to someone else.", ephemeral=True)
+            return False
+        return True
+
+    def _refresh(self) -> None:
+        self.clear_items()
+        self.add_item(PrivateCreateSiteSelect(self))
+        self.add_item(PrivateCreateFilterSelect(self))
+        self.add_item(PrivateCreateContinueButton(self))
+
+
+class PrivateCreateSiteSelect(discord.ui.Select):
+    def __init__(self, parent: PrivateCreateGeneratedView) -> None:
+        options = [
+            discord.SelectOption(
+                label=site_name[:100],
+                value=site_name,
+                default=site_name == parent.selected_site,
+            )
+            for site_name in DISPENSER_SITE_TYPES
+        ]
+        super().__init__(placeholder="Choose a site", options=options, row=0)
+        self.parent_view = parent
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        self.parent_view.selected_site = self.values[0]
+        self.parent_view._refresh()
+        await interaction.response.edit_message(
+            embed=build_private_create_generated_embed(
+                self.parent_view.selected_site,
+                self.parent_view.selected_filter,
+            ),
+            view=self.parent_view,
+        )
+
+
+class PrivateCreateFilterSelect(discord.ui.Select):
+    def __init__(self, parent: PrivateCreateGeneratedView) -> None:
+        options = [
+            discord.SelectOption(
+                label=filter_name.title()[:100],
+                value=filter_name,
+                default=filter_name == parent.selected_filter,
+            )
+            for filter_name in DISPENSER_FILTERS
+        ]
+        super().__init__(placeholder="Choose a filter", options=options, row=1)
+        self.parent_view = parent
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        self.parent_view.selected_filter = self.values[0]
+        self.parent_view._refresh()
+        await interaction.response.edit_message(
+            embed=build_private_create_generated_embed(
+                self.parent_view.selected_site,
+                self.parent_view.selected_filter,
+            ),
+            view=self.parent_view,
+        )
+
+
+class PrivateCreateContinueButton(discord.ui.Button):
+    def __init__(self, parent: PrivateCreateGeneratedView) -> None:
+        super().__init__(
+            label="Continue",
+            style=discord.ButtonStyle.success,
+            disabled=not (parent.selected_site and parent.selected_filter),
+            row=2,
+        )
+        self.parent_view = parent
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        await interaction.response.send_modal(
+            PrivateCreateGeneratedModal(
+                self.parent_view.selected_site,
+                self.parent_view.selected_filter,
+            )
+        )
+
+
+class PrivateCreateStartView(discord.ui.View):
+    def __init__(self, owner_id: int) -> None:
+        super().__init__(timeout=300)
+        self.owner_id = owner_id
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.owner_id:
+            await interaction.response.send_message("This setup panel belongs to someone else.", ephemeral=True)
+            return False
+        return True
+
+    @discord.ui.button(label="Use Specific Link", style=discord.ButtonStyle.primary, row=0)
+    async def use_specific_link(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+        await interaction.response.send_modal(PrivateCreateSpecificModal())
+
+    @discord.ui.button(label="Generate Link For Me", style=discord.ButtonStyle.success, row=0)
+    async def generate_link(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+        await interaction.response.edit_message(
+            embed=build_private_create_generated_embed(),
+            view=PrivateCreateGeneratedView(self.owner_id),
+        )
+
+    @discord.ui.button(label="Show Help", style=discord.ButtonStyle.secondary, row=1)
+    async def show_help(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+        await interaction.response.send_message(
+            "A private link needs 3 things:\n- a brand-new domain\n- a secret login path\n- a cover link\n\nYou can either paste a cover link yourself or let me generate one from `127.0.0.1:8080`.",
+            ephemeral=True,
+        )
 
 
 async def assign_linked_role(interaction: discord.Interaction) -> tuple[bool, str | None]:
@@ -194,7 +468,7 @@ async def on_message(message: discord.Message) -> None:
     await bot.process_commands(message)
 
 
-@bot.tree.command(name="link", description="Link your Discord account to your CanLite account.")
+@bot.tree.command(name="link", description="Connect your Discord account to your CanLite account.")
 @app_commands.describe(code="The 8-character code from your CanLite account page.")
 async def link_command(interaction: discord.Interaction, code: str) -> None:
     await interaction.response.defer(ephemeral=True, thinking=True)
@@ -206,22 +480,22 @@ async def link_command(interaction: discord.Interaction, code: str) -> None:
         discord_global_name=getattr(interaction.user, "global_name", None),
     )
     if not ok:
-        await interaction.followup.send(f"{result}\n\nGenerate a fresh code from {CANLITE_ACCOUNT_URL}.", ephemeral=True)
+        await interaction.followup.send(f"{result}\n\nGet a new code from {CANLITE_ACCOUNT_URL}.", ephemeral=True)
         return
 
     role_ok, role_note = await assign_linked_role(interaction)
-    message = f"Discord account linked to CanLite user #{result['user_id']}."
+    message = f"Your Discord account is now linked to CanLite user #{result['user_id']}."
     if result.get("reward_granted"):
         message += f" You got 5 credits for linking for the first time and now have {result['reward_balance']} credits."
     if role_ok:
-        message += " The linked-account role was granted."
+        message += " The linked-account role was added."
     elif role_note:
         message += f" {role_note}"
-    message += f" Manage it from {CANLITE_ACCOUNT_URL}."
+    message += f" Manage your linked account from {CANLITE_ACCOUNT_URL}."
     await interaction.followup.send(message, ephemeral=True)
 
 
-@bot.tree.command(name="dispense", description="Pick a site and filter, then get one URL privately.")
+@bot.tree.command(name="dispense", description="Get one generated link in DMs by choosing a site and filter.")
 async def dispense_command(interaction: discord.Interaction) -> None:
     await interaction.response.send_message(
         embed=build_dispenser_embed(),
@@ -229,7 +503,7 @@ async def dispense_command(interaction: discord.Interaction) -> None:
     )
 
 
-@bot.tree.command(name="private-add", description="Add a CanLite user to one of your private links.")
+@bot.tree.command(name="private-add", description="Give someone access to one of your private links.")
 @app_commands.describe(domain="The private-link domain you own.", identifier="Their CanLite email, Discord @name, mention, or Discord ID.")
 async def private_add_command(interaction: discord.Interaction, domain: str, identifier: str) -> None:
     await interaction.response.defer(ephemeral=True, thinking=True)
@@ -248,7 +522,7 @@ async def private_add_command(interaction: discord.Interaction, domain: str, ide
     await interaction.followup.send(message, ephemeral=True)
 
 
-@bot.tree.command(name="private-remove", description="Remove a CanLite user from one of your private links.")
+@bot.tree.command(name="private-remove", description="Remove someone's access from one of your private links.")
 @app_commands.describe(domain="The private-link domain you own.", identifier="Their CanLite email, Discord @name, mention, or Discord ID.")
 async def private_remove_command(interaction: discord.Interaction, domain: str, identifier: str) -> None:
     await interaction.response.defer(ephemeral=True, thinking=True)
@@ -256,7 +530,7 @@ async def private_remove_command(interaction: discord.Interaction, domain: str, 
     await interaction.followup.send(message, ephemeral=True)
 
 
-@bot.tree.command(name="private-list", description="List the private links on your linked CanLite account.")
+@bot.tree.command(name="private-list", description="Show the private links on your linked CanLite account.")
 async def private_list_command(interaction: discord.Interaction) -> None:
     await interaction.response.defer(ephemeral=True, thinking=True)
     ok, result = await list_private_links_for_owner(bot.db_pool, interaction.user.id)
@@ -267,7 +541,7 @@ async def private_list_command(interaction: discord.Interaction) -> None:
     links = result if isinstance(result, list) else []
     if not links:
         await interaction.followup.send(
-            "No private links yet.\n\nStart with `/private-create` and fill in:\n- a brand-new domain\n- a secret login path\n- a specific cover link, or a generated one",
+            "No private links yet.\n\nStart with `/private-create`, then choose:\n- a brand-new domain\n- a secret login path\n- either a specific cover link or a generated one",
             ephemeral=True,
         )
         return
@@ -280,7 +554,7 @@ async def private_list_command(interaction: discord.Interaction) -> None:
     )
     embed.add_field(
         name="Setup Reminder",
-        value="Use a brand-new domain, choose a secret login path, and choose either a specific cover link or a generated one.",
+        value="Use a brand-new domain, choose a secret login path, and then choose either a specific cover link or a generated one.",
         inline=False,
     )
     if len(links) > 20:
@@ -288,103 +562,32 @@ async def private_list_command(interaction: discord.Interaction) -> None:
     await interaction.followup.send(embed=embed, ephemeral=True)
 
 
-@bot.tree.command(name="private-create", description="Create or update one of your real CanLite private links.")
-@app_commands.describe(
-    domain="A brand-new domain or subdomain you control, like study.example.com.",
-    login_path="A secret path like /school or /notes that opens your CanLite login page.",
-    cover_url="Optional: a specific cover link to use.",
-    site="Optional: choose a site if you want CanLite to generate the cover link.",
-    filter_name="Optional: choose a filter if you want CanLite to generate the cover link.",
-)
-@app_commands.choices(
-    site=[app_commands.Choice(name=site_name, value=site_name) for site_name in DISPENSER_SITE_TYPES],
-    filter_name=[app_commands.Choice(name=filter_value.title(), value=filter_value) for filter_value in DISPENSER_FILTERS],
-)
-async def private_create_command(
-    interaction: discord.Interaction,
-    domain: str,
-    login_path: str,
-    cover_url: str | None = None,
-    site: str | None = None,
-    filter_name: str | None = None,
-) -> None:
-    await interaction.response.defer(ephemeral=True, thinking=True)
-
-    linked_user_id = await bot.db_pool.fetchval(
-        "SELECT user_id FROM discord_account_links WHERE discord_user_id = $1",
-        str(interaction.user.id),
-    )
+@bot.tree.command(name="private-create", description="Start guided private-link setup.")
+async def private_create_command(interaction: discord.Interaction) -> None:
+    linked_user_id = await get_linked_canlite_user_id(bot.db_pool, interaction.user.id)
     if not linked_user_id:
-        await interaction.followup.send(
+        await interaction.response.send_message(
             f"Link your Discord account first from {CANLITE_ACCOUNT_URL}, then run `/private-create` again.",
             ephemeral=True,
         )
         return
 
-    provided_cover_url = (cover_url or "").strip()
-    selected_site = (site or "").strip()
-    selected_filter = (filter_name or "").strip().lower()
-    if not provided_cover_url and (not selected_site or not selected_filter):
-        await interaction.followup.send(
-            "Choose one cover-link method:\n- set `cover_url`, or\n- set both `site` and `filter_name` so I can generate one from `127.0.0.1:8080`.",
-            ephemeral=True,
-        )
-        return
-
-    try:
-        cover_result = await create_private_link(
-            url=provided_cover_url or None,
-            site=selected_site or None,
-            filter_name=selected_filter or None,
-        )
-    except Exception as exc:
-        await interaction.followup.send(f"Could not build the cover link right now: {exc}", ephemeral=True)
-        return
-
-    resolved_cover_url = str(cover_result.get("url") or "").strip()
-    cover_source = "specific link" if provided_cover_url else f"generated {selected_site} / {selected_filter}"
-
-    try:
-        ok, result = await save_private_link_for_owner(
-            bot.db_pool,
-            bot.route_db_pool,
-            interaction.user.id,
-            domain=domain,
-            cover_url=resolved_cover_url,
-            login_path=login_path,
-        )
-    except Exception as exc:
-        await interaction.followup.send(f"Could not save your private link right now: {exc}", ephemeral=True)
-        return
-
-    if not ok:
-        await interaction.followup.send(str(result), ephemeral=True)
-        return
-
-    payload = result if isinstance(result, dict) else {"action": "saved"}
-
-    saved_domain = str(payload.get("domain") or "").strip()
-    saved_login_path = str(payload.get("login_path") or "").strip()
-    dm_note = await try_send_owner_private_link_dm(interaction.user, payload)
-    message = (
-        f"Private link saved for `https://{saved_domain}`.\n\n"
-        f"Login URL: `https://{saved_domain}{saved_login_path}`\n"
-        f"Cover link: `{payload.get('cover_url')}`\n"
-        f"Cover link source: `{cover_source}`\n\n"
-        "The login URL is the secret one you use to open the private CanLite page.\n"
-        "Anyone who visits the main domain normally will see the cover link instead."
+    await interaction.response.send_message(
+        embed=build_private_create_intro_embed(),
+        view=PrivateCreateStartView(interaction.user.id),
+        ephemeral=True,
     )
-    if dm_note:
-        message += f"\n\n{dm_note}"
-    else:
-        message += "\n\nI also sent the setup details to your DMs."
-    await interaction.followup.send(message, ephemeral=True)
 
 
-@bot.tree.command(name="private-help", description="Show a simple guide for setting up a real CanLite private link.")
+@bot.tree.command(name="private-help", description="Explain what a private link is and how to set one up.")
 async def private_help_command(interaction: discord.Interaction) -> None:
-    embed = discord.Embed(title="Private Link Setup", color=discord.Color.blurple())
-    embed.description = "A private link is your own domain that hides CanLite behind a normal-looking cover link."
+    embed = discord.Embed(title="Private Link Help", color=discord.Color.blurple())
+    embed.description = "A private link uses your own domain. Regular visitors see a normal cover link. You use a secret login URL to open the private CanLite page."
+    embed.add_field(
+        name="Before You Start",
+        value="You need a linked CanLite account and a brand-new domain or subdomain.",
+        inline=False,
+    )
     embed.add_field(
         name="Step 1",
         value=f"Link your Discord account from {CANLITE_ACCOUNT_URL}.",
@@ -397,12 +600,12 @@ async def private_help_command(interaction: discord.Interaction) -> None:
     )
     embed.add_field(
         name="Step 3",
-        value="Run `/private-create` with your domain, a secret login path, and either a specific cover link or a generated one.",
+        value="Run `/private-create`, then choose whether you want to paste a cover link or generate one.",
         inline=False,
     )
     embed.add_field(
-        name="Two Cover-Link Options",
-        value="Option A: set `cover_url`\nOption B: set both `site` and `filter_name` to generate one from `127.0.0.1:8080`",
+        name="Cover Link Options",
+        value="Option 1: paste a specific cover link\nOption 2: choose a site and filter to generate one from `127.0.0.1:8080`",
         inline=False,
     )
     embed.add_field(
@@ -413,7 +616,7 @@ async def private_help_command(interaction: discord.Interaction) -> None:
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
 
-@bot.tree.command(name="rank", description="Show your XP, level, and message count.")
+@bot.tree.command(name="rank", description="Show your server level, XP, and message count.")
 async def rank_command(interaction: discord.Interaction) -> None:
     xp_store = load_xp_store()
     guild_bucket = xp_store.get(str(interaction.guild_id), {}) if interaction.guild_id else {}
@@ -429,7 +632,7 @@ async def rank_command(interaction: discord.Interaction) -> None:
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
 
-@bot.tree.command(name="credits", description="Show your linked CanLite credit balance.")
+@bot.tree.command(name="credits", description="Show your CanLite credit balance.")
 async def credits_command(interaction: discord.Interaction) -> None:
     linked, balance = await get_credit_balance_for_discord_user(bot.db_pool, interaction.user.id)
     if not linked or balance is None:
@@ -442,13 +645,13 @@ async def credits_command(interaction: discord.Interaction) -> None:
     embed = discord.Embed(title="CanLite Credits", color=discord.Color.green())
     embed.add_field(name="Member", value=interaction.user.mention, inline=True)
     embed.add_field(name="Balance", value=str(balance), inline=True)
-    embed.set_footer(text="Credit balance is shown publicly in this channel.")
     await interaction.response.send_message(
         embed=embed,
+        ephemeral=True,
     )
 
 
-@bot.tree.command(name="leaderboard", description="Show the server XP leaderboard.")
+@bot.tree.command(name="leaderboard", description="Show this server's XP leaderboard.")
 async def leaderboard_command(interaction: discord.Interaction) -> None:
     if interaction.guild_id is None:
         await interaction.response.send_message("This command only works in a server.", ephemeral=True)
@@ -470,33 +673,33 @@ async def leaderboard_command(interaction: discord.Interaction) -> None:
     await interaction.response.send_message(embed=embed)
 
 
-@bot.tree.command(name="reset-dispense-user", description="Reset one member's dispenser limit.")
+@bot.tree.command(name="reset-dispense-user", description="Reset one member's link-dispenser limit.")
 @app_commands.check(is_catalog_admin)
-@app_commands.describe(member="The member whose 3-link dispenser limit should be reset.")
+@app_commands.describe(member="The member whose dispenser limit should be reset.")
 async def reset_dispense_user_command(interaction: discord.Interaction, member: discord.Member) -> None:
     changed = reset_user_dispense(interaction.guild_id, member.id)
-    message = f"Reset dispenser usage for {member.mention}."
+    message = f"Reset the dispenser limit for {member.mention}."
     if not changed:
         message = f"{member.mention} was already at 0 used links."
     await interaction.response.send_message(message)
 
 
-@bot.tree.command(name="reset-dispense-server", description="Reset dispenser limits for the whole server.")
+@bot.tree.command(name="reset-dispense-server", description="Reset the link-dispenser limit for this whole server.")
 @app_commands.check(is_catalog_admin)
 async def reset_dispense_server_command(interaction: discord.Interaction) -> None:
     affected = reset_guild_dispense(interaction.guild_id)
-    await interaction.response.send_message(f"Reset dispenser usage for this server. Cleared {affected} member record(s).")
+    await interaction.response.send_message(f"Reset the dispenser limit for this server. Cleared {affected} member record(s).")
 
 
-@bot.tree.command(name="add-link", description="Add one URL entry to the dispenser catalog.")
+@bot.tree.command(name="add-link", description="Add one site/filter URL to the dispenser catalog.")
 @app_commands.check(is_catalog_admin)
 @app_commands.describe(
-    site="Site name users pick from.",
-    filter_name="Filter name users pick after choosing the site.",
+    site="The site name members choose first.",
+    filter_name="The filter name members choose next.",
     url="The URL to send.",
-    category="Optional category.",
-    host_type="Optional host type.",
-    status="Optional status.",
+    category="Optional category label.",
+    host_type="Optional host type label.",
+    status="Optional status label.",
     tags="Optional comma-separated tags."
 )
 async def add_link_command(
@@ -526,11 +729,11 @@ async def add_link_command(
     )
 
 
-@bot.tree.command(name="bulk-add-links", description="Bulk import many site/filter/url entries from JSON or CSV.")
+@bot.tree.command(name="bulk-add-links", description="Import many dispenser URLs from JSON or CSV.")
 @app_commands.check(is_catalog_admin)
 @app_commands.describe(
     payload="JSON array or CSV text. CSV headers: site,filter,url,category,hostType,status,tags",
-    attachment="Optional JSON or CSV file attachment."
+    attachment="Optional JSON or CSV file."
 )
 async def bulk_add_links_command(
     interaction: discord.Interaction,
@@ -558,7 +761,7 @@ async def bulk_add_links_command(
     )
 
 
-@bot.tree.command(name="remove-link", description="Remove one URL entry from the dispenser catalog.")
+@bot.tree.command(name="remove-link", description="Remove one dispenser URL from the catalog.")
 @app_commands.check(is_catalog_admin)
 @app_commands.describe(link_id="The catalog entry ID to remove.")
 async def remove_link_command(interaction: discord.Interaction, link_id: str) -> None:
@@ -569,7 +772,7 @@ async def remove_link_command(interaction: discord.Interaction, link_id: str) ->
     await interaction.response.send_message(f"Removed `{slugify(link_id)}`.", ephemeral=True)
 
 
-@bot.tree.command(name="list-links", description="List the current dispenser catalog grouped by site.")
+@bot.tree.command(name="list-links", description="Show the dispenser catalog grouped by site.")
 @app_commands.check(is_catalog_admin)
 async def list_links_command(interaction: discord.Interaction) -> None:
     site_names = catalog_store.get_site_names()
@@ -581,7 +784,7 @@ async def list_links_command(interaction: discord.Interaction) -> None:
     for site_name in site_names[:20]:
         filter_names = catalog_store.get_filters_for_site(site_name)
         url_count = catalog_store.get_entry_count_for_site(site_name)
-        lines.append(f"{site_name} - {url_count} urls - filters: {', '.join(filter_names[:6])}")
+        lines.append(f"{site_name} - {url_count} link(s) - filters: {', '.join(filter_names[:6])}")
 
     embed = discord.Embed(title="Dispenser Catalog", description="\n".join(lines), color=discord.Color.green())
     await interaction.response.send_message(embed=embed, ephemeral=True)
@@ -595,7 +798,7 @@ async def list_links_command(interaction: discord.Interaction) -> None:
 @reset_dispense_server_command.error
 async def admin_command_error(interaction: discord.Interaction, error: app_commands.AppCommandError) -> None:
     if isinstance(error, app_commands.CheckFailure):
-        message = "You need `Manage Server` or `Administrator` to manage the catalog."
+        message = "You need `Manage Server` or `Administrator` to use this admin command."
         if interaction.response.is_done():
             await interaction.followup.send(message, ephemeral=True)
         else:
